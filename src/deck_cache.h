@@ -29,6 +29,9 @@ bool deck_cache_save_manifest(const char *deck_id, const char *json, size_t len)
  * expect_bytes (caller free()s). Verification failure deletes the bad file. */
 bool deck_cache_read_frame(const char *deck_id, const char *digest,
                            uint32_t expect_bytes, uint8_t **out);
+bool deck_cache_read_frame_ex(const char *deck_id, const char *digest,
+                              uint32_t expect_bytes, uint8_t **out_raw,
+                              uint8_t **out_blob, size_t *out_blob_len);
 
 /* Verify + write a fetched frame (tmp file + rename, so a power cut never
  * leaves a plausible-looking partial). Rejects digest/length mismatches. */

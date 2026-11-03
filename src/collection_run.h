@@ -13,6 +13,10 @@
 #include <stdint.h>
 
 void collection_boot(void);
+#include "frame_collection.h"
+const fc_manifest_t *collection_active_manifest(void);
+int collection_current_index(void);
+void collection_note_session_index(int index);
 
 /* On a timer wake, serve a due Album frame and/or decide the network heartbeat
  * is not due yet. True means main may go directly back to sleep without WiFi. */

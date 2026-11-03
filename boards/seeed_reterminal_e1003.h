@@ -178,7 +178,7 @@
  * which the dev-info reads need). Seeed drives the whole controller at
  * 10 MHz (GxEPD2_reTerminal_E1003.ino); the 1.3 MB frame takes ~2.6 s of
  * clocking at 4 MHz vs ~1 s here. */
-#define EPD_IT8951_DATA_HZ  (10 * 1000 * 1000)
+#define EPD_IT8951_DATA_HZ  (20 * 1000 * 1000)
 
 /* GT911 at 400 kHz like every Seeed E1003 source (E1003_TouchDraw.ino:322);
  * the SHT4x on the same bus keeps its own 100 kHz device clock. */

@@ -122,3 +122,27 @@ bool epd_stream_end(bool refresh)
     const epd_driver_t *d = epd_active_driver();
     return d->stream_end ? d->stream_end(refresh) : false;
 }
+
+int epd_slot_count(void)
+{
+    const epd_driver_t *d = epd_active_driver();
+    return d->slot_count ? d->slot_count() : 0;
+}
+
+bool epd_preload_slot(int slot, const uint8_t *image,
+                      epd_abort_fn_t should_abort, void *abort_ctx)
+{
+    const epd_driver_t *d = epd_active_driver();
+    return d->preload_slot
+               ? d->preload_slot(slot, image, should_abort, abort_ctx)
+               : false;
+}
+
+bool epd_display_slot_mode(int slot, int x, int y, int w, int h,
+                           epd_refresh_t mode)
+{
+    const epd_driver_t *d = epd_active_driver();
+    return d->display_slot_mode
+               ? d->display_slot_mode(slot, x, y, w, h, mode)
+               : false;
+}

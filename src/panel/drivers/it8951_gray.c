@@ -48,6 +48,8 @@ static const char *TAG = "epd_it8951";
 #define LD_IMG_AREA   0x0021
 #define LD_IMG_END    0x0022
 #define DPY_AREA      0x0034
+#define DPY_BUF_AREA  0x0037
+#define IT8951_SLOTS  4
 #define GET_DEV_INFO  0x0302
 #define VCOM          0x0039
 #define CMD_TEMP      0x0040   /* force temperature (selects the waveform LUT) */
@@ -70,6 +72,12 @@ static const char *TAG = "epd_it8951";
  * of; overridable per build in case a panel batch maps it elsewhere. */
 #ifndef EPD_IT8951_INIT_MODE
 #define EPD_IT8951_INIT_MODE MODE_INIT
+#endif
+#ifndef EPD_IT8951_A2_MODE
+#define EPD_IT8951_A2_MODE 6
+#endif
+#ifndef EPD_IT8951_GRAY_MODE
+#define EPD_IT8951_GRAY_MODE 5
 #endif
 
 /* X-mirror. The E1003 / EE03 (ED103TC2) glass is physically left-right
@@ -362,7 +370,7 @@ static esp_err_t it8951_port_init(void)
         .sclk_io_num = EPD_PIN_SCLK,
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
-        .max_transfer_sz = 4096,
+        .max_transfer_sz = 16384,
     };
     spi_device_interface_config_t dev = {
         .clock_speed_hz = EPD_SPI_HZ,
@@ -535,7 +543,32 @@ static void it8951_init(void)
     s_in_init = false;
 }
 
+static uint32_t it8951_slot_addr(int slot)
+{
+    uint32_t stride = ((uint32_t)EPD_BUF_BYTES + 0xFFu) & ~0xFFu;
+    if (slot < 0 || slot >= IT8951_SLOTS) slot = 0;
+    return s_img_buf_addr + (uint32_t)slot * stride;
+}
+
+static void load_img_area_start_addr_rect(uint32_t buf_addr, int cx, int cy, int cw, int ch)
+{
+    write_reg(REG_LISAR + 2, (uint16_t)((buf_addr >> 16) & 0xFFFF));
+    write_reg(REG_LISAR,     (uint16_t)(buf_addr & 0xFFFF));
+    write_reg(REG_UP1SR + 2, (uint16_t)(read_reg(REG_UP1SR + 2) & ~(1 << 2)));
+    uint16_t args[5] = {
+        (uint16_t)((ENDIAN_B << 8) | (PIXFMT_4BPP << 4) | 0),
+        (uint16_t)cx, (uint16_t)cy, (uint16_t)cw, (uint16_t)ch,
+    };
+    send_cmd_args(LD_IMG_AREA, args, 5);
+}
+
 static void load_img_area_start_rect(int cx, int cy, int cw, int ch)
+{
+    load_img_area_start_addr_rect(s_img_buf_addr, cx, cy, cw, ch);
+}
+
+static void unused_orig_load_img_area_body(int cx, int cy, int cw, int ch) __attribute__((unused));
+static void unused_orig_load_img_area_body(int cx, int cy, int cw, int ch)
 {
     /* target address (LISAR) */
     write_reg(REG_LISAR + 2, (uint16_t)((s_img_buf_addr >> 16) & 0xFFFF));
@@ -581,7 +614,139 @@ static void stream_row(const uint8_t *row, uint8_t *scratch)
 }
 
 /* Load a full-frame 4bpp buffer into controller DRAM and GC16-refresh it. */
+#define IT8951_BATCH_ROWS 16
+
+static bool it8951_load_full_to_slot(int slot, const uint8_t *fb,
+                                     bool (*should_abort)(void *ctx),
+                                     void *abort_ctx)
+{
+    const int iPitch = EPD_WIDTH / 2;
+    size_t batch_bytes = (size_t)IT8951_BATCH_ROWS * (size_t)iPitch;
+    int batch_rows = IT8951_BATCH_ROWS;
+    uint8_t *scratch = heap_caps_malloc(batch_bytes, MALLOC_CAP_DMA);
+    if (!scratch) {
+        batch_rows = 1;
+        scratch = heap_caps_malloc((size_t)iPitch, MALLOC_CAP_DMA);
+        if (!scratch) { ESP_LOGE(TAG, "OOM row scratch"); return false; }
+    }
+
+    uint32_t addr = it8951_slot_addr(slot);
+    write_cmd(SYS_RUN);
+    wait_display_done();
+    load_img_area_start_addr_rect(addr, 0, 0, EPD_WIDTH, EPD_HEIGHT);
+
+    cs(0);
+    wait_ready(); word_tx(0x0000);
+    wait_ready();
+
+    bool aborted = false;
+    for (int y = 0; y < EPD_HEIGHT; y += batch_rows) {
+        if (should_abort && should_abort(abort_ctx)) {
+            aborted = true;
+            break;
+        }
+        int nr = (y + batch_rows <= EPD_HEIGHT) ? batch_rows : (EPD_HEIGHT - y);
+        for (int r = 0; r < nr; r++) {
+            const uint8_t *src = fb + (size_t)(y + r) * (size_t)iPitch;
+            uint8_t *dst = scratch + (size_t)r * (size_t)iPitch;
+#if EPD_IT8951_MIRROR_X
+            for (int x = 0; x < iPitch; x++) {
+                uint8_t b = src[x];
+                dst[iPitch - 1 - x] = (uint8_t)((b >> 4) | (b << 4));
+            }
+#else
+            memcpy(dst, src, (size_t)iPitch);
+#endif
+        }
+        spi_transaction_t t = {0};
+        t.length = (size_t)nr * (size_t)iPitch * 8u;
+        t.tx_buffer = scratch;
+        spi_device_polling_transmit(s_spi_data, &t);
+    }
+    cs(1);
+    write_cmd(LD_IMG_END);
+    free(scratch);
+    return !aborted && !s_hung;
+}
+
+static int it8951_slot_count(void)
+{
+    return IT8951_SLOTS;
+}
+
+static bool it8951_preload_slot(int slot, const uint8_t *fb,
+                                bool (*should_abort)(void *ctx),
+                                void *abort_ctx)
+{
+    if (!fb || slot < 0 || slot >= IT8951_SLOTS) return false;
+    bool ok = it8951_load_full_to_slot(slot, fb, should_abort, abort_ctx);
+    write_cmd(STANDBY);
+    if (ok) {
+        ESP_LOGI(TAG, "preloaded SDRAM slot %d (addr=0x%08x)",
+                 slot, (unsigned)it8951_slot_addr(slot));
+    }
+    return ok;
+}
+
+static bool it8951_display_slot_mode(int slot, int x, int y, int w, int h,
+                                     epd_refresh_t mode)
+{
+    if (slot < 0 || slot >= IT8951_SLOTS) return false;
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > EPD_WIDTH)  w = EPD_WIDTH - x;
+    if (y + h > EPD_HEIGHT) h = EPD_HEIGHT - y;
+    if (w <= 0 || h <= 0) return false;
+
+    int x0 = x & ~3;
+    int x1 = (x + w + 3) & ~3;
+    if (x1 > EPD_WIDTH) x1 = EPD_WIDTH;
+    int aw = x1 - x0;
+#if EPD_IT8951_MIRROR_X
+    int cx = EPD_WIDTH - x1;
+#else
+    int cx = x0;
+#endif
+
+    int wave = MODE_DU;
+    if (mode == EPD_RF_A2)        wave = EPD_IT8951_A2_MODE;
+    else if (mode == EPD_RF_GRAY) wave = EPD_IT8951_GRAY_MODE;
+    else if (mode == EPD_RF_GC16) wave = MODE_GC16;
+
+    uint32_t addr = it8951_slot_addr(slot);
+    write_cmd(SYS_RUN);
+    wait_display_done();
+    uint16_t dargs[7] = {
+        (uint16_t)cx, (uint16_t)y, (uint16_t)aw, (uint16_t)h,
+        (uint16_t)wave,
+        (uint16_t)(addr & 0xFFFF),
+        (uint16_t)((addr >> 16) & 0xFFFF),
+    };
+    send_cmd_args(DPY_BUF_AREA, dargs, 7);
+    wait_display_done();
+    write_cmd(STANDBY);
+    note_refresh();
+    ESP_LOGI(TAG, "slot %d mode %d (%d,%d %dx%d) refresh done",
+             slot, wave, x0, y, aw, h);
+    ESP_LOGI(TAG, "refresh done");
+    return !s_hung;
+}
+
+/* Load a full-frame 4bpp buffer into controller DRAM and GC16-refresh it. */
 static void write_and_refresh(const uint8_t *fb)
+{
+    log_data_clock("full");
+    if (!it8951_load_full_to_slot(0, fb, NULL, NULL)) return;
+    uint16_t dargs[5] = { 0, 0, EPD_WIDTH, EPD_HEIGHT, MODE_GC16 };
+    send_cmd_args(DPY_AREA, dargs, 5);
+    wait_display_done();
+    write_cmd(STANDBY);
+    note_refresh();
+    ESP_LOGI(TAG, "refresh done");
+}
+
+static void unused_orig_write_and_refresh(const uint8_t *fb) __attribute__((unused));
+static void unused_orig_write_and_refresh(const uint8_t *fb)
 {
     const int iPitch = EPD_WIDTH / 2;   /* 936 bytes/row */
     uint8_t *scratch = heap_caps_malloc(iPitch, MALLOC_CAP_DMA);
@@ -892,6 +1057,9 @@ const epd_driver_t it8951_gray_driver = {
     .sleep              = it8951_sleep,
     .display_partial      = it8951_display_partial,
     .display_partial_mode = it8951_display_partial_mode,
+    .slot_count           = it8951_slot_count,
+    .preload_slot         = it8951_preload_slot,
+    .display_slot_mode    = it8951_display_slot_mode,
 };
 
 #endif /* PANEL_DRIVER_IT8951_GRAY */

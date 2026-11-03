@@ -201,9 +201,12 @@ static bool frame_path(const char *deck_id, const char *digest,
     return n > 0 && n < (int)cap;
 }
 
-bool deck_cache_read_frame(const char *deck_id, const char *digest,
-                           uint32_t expect_bytes, uint8_t **out)
+bool deck_cache_read_frame_ex(const char *deck_id, const char *digest,
+                              uint32_t expect_bytes, uint8_t **out,
+                              uint8_t **out_blob, size_t *out_blob_len)
 {
+    if (out_blob) *out_blob = NULL;
+    if (out_blob_len) *out_blob_len = 0;
     if (!out) return false;
     *out = NULL;
     if (expect_bytes == 0) return false;
@@ -249,9 +252,13 @@ bool deck_cache_read_frame(const char *deck_id, const char *digest,
 
     /* Fast zero-copy path for legacy unframed raw files on existing SD cards */
     uint8_t *buf = NULL;
-    if (n == expect_bytes) {
+    if (n == expect_bytes && !out_blob) {
         buf = blob;
         blob = NULL;
+    } else if (n == expect_bytes) {
+        buf = fb_alloc(expect_bytes);
+        if (!buf) { free(blob); return false; }
+        memcpy(buf, blob, expect_bytes);
     } else {
         buf = fb_alloc(expect_bytes);
         if (!buf) { free(blob); return false; }
@@ -262,9 +269,13 @@ bool deck_cache_read_frame(const char *deck_id, const char *digest,
 #ifdef ESP_PLATFORM
         int64_t dec_us = esp_timer_get_time() - t_dec0;
 #endif
-        free(blob);
+        if (!out_blob) {
+            free(blob);
+            blob = NULL;
+        }
         if (!dec_ok) {
             ESP_LOGW(TAG, "cached frame %s failed decompress; deleting", digest);
+            free(blob);
             free(buf);
             unlink(path);
             return false;
@@ -278,12 +289,25 @@ bool deck_cache_read_frame(const char *deck_id, const char *digest,
 
     if (!deck_digest_check(buf, expect_bytes, expect_bytes, digest)) {
         ESP_LOGW(TAG, "cached frame %s fails verification; deleting", digest);
+        free(blob);
         free(buf);
         unlink(path);
         return false;
     }
+    if (out_blob) {
+        *out_blob = blob;
+        if (out_blob_len) *out_blob_len = n;
+    } else {
+        free(blob);
+    }
     *out = buf;
     return true;
+}
+
+bool deck_cache_read_frame(const char *deck_id, const char *digest,
+                           uint32_t expect_bytes, uint8_t **out)
+{
+    return deck_cache_read_frame_ex(deck_id, digest, expect_bytes, out, NULL, NULL);
 }
 
 bool deck_cache_write_frame(const char *deck_id, const char *digest,

@@ -27,6 +27,9 @@ bool collection_cache_save_manifest(const char *collection_id,
 
 bool collection_cache_read_frame(const char *collection_id, const char *digest,
                                  uint32_t expect_bytes, uint8_t **out);
+bool collection_cache_read_frame_ex(const char *collection_id, const char *digest,
+                                    uint32_t expect_bytes, uint8_t **out_raw,
+                                    uint8_t **out_blob, size_t *out_blob_len);
 bool collection_cache_write_frame(const char *collection_id, const char *digest,
                                   const uint8_t *data, size_t len,
                                   uint32_t expect_bytes);

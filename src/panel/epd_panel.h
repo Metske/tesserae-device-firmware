@@ -129,6 +129,11 @@ typedef struct epd_driver {
      * 960 KB frame in RAM. */
     bool (*stream_rows_side)(int side, const uint8_t *rows, int y0, int nrows);
     bool (*stream_end)(bool refresh);
+    int  (*slot_count)(void);
+    bool (*preload_slot)(int slot, const uint8_t *image,
+                         bool (*should_abort)(void *ctx), void *abort_ctx);
+    bool (*display_slot_mode)(int slot, int x, int y, int w, int h,
+                              epd_refresh_t mode);
 } epd_driver_t;
 
 /* The single driver selected for this board at build time. Never NULL --

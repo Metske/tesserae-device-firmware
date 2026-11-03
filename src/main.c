@@ -86,6 +86,7 @@
 #include "rest_config.h"
 #include "splash.h"
 #include "wifi_manager.h"
+#include "session_run.h"
 
 static const char *TAG = "main";
 
@@ -3313,7 +3314,7 @@ void app_main(void)
     if (woke_by_button) {
         bool nav_fallthrough = false;
         bool nav_maintenance = false;
-        if (deck_try_button(button_name(woke_btn), &s_button_event_seq,
+        if (session_run_try_button_wake(woke_btn, &s_button_event_seq,
                             &nav_fallthrough, &nav_maintenance)) {
             if (nav_maintenance) {
                 enter_ble_maintenance_from_awake_window();
@@ -3404,11 +3405,24 @@ void app_main(void)
                  * each falls through only when the newer one holds nothing for
                  * the frame on glass. */
                 bool p2_poll = false;
+                bool t_fallthrough_btn = false;
+                bool t_maint = false;
                 if (touch3_try_touch(touch_st.x0, touch_st.y0,
                                      touch_st.x1, touch_st.y1,
                                      touch_st.ms, &p2_poll)) {
                     /* wake continues: frame GET + status deliver the result */
                     touch3_tap = true;
+                } else if (session_run_try_touch_wake(&touch_st, &s_button_event_seq,
+                                                      &t_fallthrough_btn, &t_maint)) {
+                    if (t_maint) {
+                        enter_ble_maintenance_from_awake_window();
+                        return;
+                    }
+                    if (!t_fallthrough_btn) {
+                        ESP_LOGI(TAG, "touch served locally in interactive session; back to sleep");
+                        sleep_forever_or_until_timer();
+                        return;
+                    }
                 } else if (proto2_try_touch(touch_st.x0, touch_st.y0,
                                      touch_st.x1, touch_st.y1,
                                      touch_st.ms, &p2_poll)) {
@@ -3432,6 +3446,20 @@ void app_main(void)
                                touch_st.ms, rest_config_get()->last_frame_etag, touch_ev);
                 }
             } else {
+                bool t_fallthrough_btn = false;
+                bool t_maint = false;
+                if (session_run_try_touch_wake(NULL, &s_button_event_seq,
+                                               &t_fallthrough_btn, &t_maint)) {
+                    if (t_maint) {
+                        enter_ble_maintenance_from_awake_window();
+                        return;
+                    }
+                    if (!t_fallthrough_btn) {
+                        ESP_LOGI(TAG, "touch wake served locally in interactive session; back to sleep");
+                        sleep_forever_or_until_timer();
+                        return;
+                    }
+                }
                 /* Quick-tap race: the finger lifted before the ~1 s deep-sleep
                  * boot let us read a point. Do NOT force a repaint -- fall through
                  * to a normal poll (keeps If-None-Match, so an unchanged frame

@@ -89,6 +89,13 @@ bool epd_stream_rows(const uint8_t *rows, int y0, int nrows);
 bool epd_stream_rows_side(int side, const uint8_t *rows, int y0, int nrows);
 bool epd_stream_end(bool refresh);
 
+typedef bool (*epd_abort_fn_t)(void *ctx);
+int  epd_slot_count(void);
+bool epd_preload_slot(int slot, const uint8_t *image,
+                      epd_abort_fn_t should_abort, void *abort_ctx);
+bool epd_display_slot_mode(int slot, int x, int y, int w, int h,
+                           epd_refresh_t mode);
+
 /* Override the 4-gray register-LUT tuning at runtime (EPD_GRAY_TUNER builds).
  * A no-op on panels that do not use register LUTs. Applied at the next
  * epd_init(), since that is when the LUTs and CDI are uploaded. */

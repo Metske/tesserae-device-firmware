@@ -458,3 +458,26 @@ int32_t collection_next_sleep_s(int32_t ordinary_s)
     if (best > SLEEP_INTERVAL_MAX_S) best = SLEEP_INTERVAL_MAX_S;
     return (int32_t)best;
 }
+
+const fc_manifest_t *collection_active_manifest(void)
+{
+    return s_have_collection ? s_manifest : NULL;
+}
+
+int collection_current_index(void)
+{
+    if (!s_have_collection || !s_manifest || s_manifest->n_frames <= 0) return 0;
+    if (s_play.current_index >= 0 && s_play.current_index < s_manifest->n_frames) {
+        return s_play.current_index;
+    }
+    return 0;
+}
+
+void collection_note_session_index(int index)
+{
+    if (!s_have_collection || !s_manifest) return;
+    if (index >= 0 && index < s_manifest->n_frames) {
+        s_play.current_index = index;
+        report("playing");
+    }
+}

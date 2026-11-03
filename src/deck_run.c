@@ -335,3 +335,15 @@ void deck_pre_sleep(void)
 {
     cache_storage_prepare_sleep();
 }
+
+const deck_manifest_t *deck_active_manifest(void)
+{
+    return s_have_deck ? s_manifest : NULL;
+}
+
+void deck_note_session_painted(const char *page_id)
+{
+    if (!s_have_deck || !s_manifest || !page_id || !page_id[0]) return;
+    nav_persist(s_manifest->deck_id, page_id, true);
+    rest_set_deck_painted(page_id, s_manifest->version);
+}

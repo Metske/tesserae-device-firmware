@@ -14,6 +14,10 @@
 #include <stdint.h>
 
 #include "net_rest.h"   /* rest_status_out_t (deck resync signal) */
+#include "deck.h"
+
+const deck_manifest_t *deck_active_manifest(void);
+void deck_note_session_painted(const char *page_id);
 
 /* Boot hook, call once after rest_config_load(): probes/mounts the card,
  * advertises the deck_cache capability for this wake's register/status
