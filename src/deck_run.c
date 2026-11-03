@@ -347,3 +347,31 @@ void deck_note_session_painted(const char *page_id)
     nav_persist(s_manifest->deck_id, page_id, true);
     rest_set_deck_painted(page_id, s_manifest->version);
 }
+
+bool deck_has_synced_cache(void)
+{
+    return s_have_deck && s_manifest && s_manifest->n_pages > 0;
+}
+
+bool deck_try_passive_refresh(void)
+{
+    if (!s_have_deck || !s_manifest || s_manifest->n_pages <= 0) return false;
+    const char *cur = rest_config_get()->deck_page;
+    const char *target = NULL;
+    if (cur && cur[0]) {
+        target = deck_nav_button(s_manifest, cur, "right");
+    }
+    if (!target) {
+        int cur_idx = -1;
+        for (int i = 0; i < s_manifest->n_pages; i++) {
+            if (cur && strcmp(s_manifest->pages[i].page_id, cur) == 0) {
+                cur_idx = i;
+                break;
+            }
+        }
+        int next_idx = (cur_idx + 1) % s_manifest->n_pages;
+        target = s_manifest->pages[next_idx].page_id;
+    }
+    if (!target || !target[0]) return false;
+    return serve_page_from_sd(target);
+}

@@ -109,6 +109,11 @@ typedef struct {
     char     collection_id[FC_ID_CAP];
     char     collection_kind[FC_KIND_CAP];
     char     collection_version[FC_VERSION_CAP];
+    bool     sync_policy_present;
+    char     scheduled_sync_hhmm[8];
+    int32_t  passive_refresh_s;
+    bool     tz_offset_present;
+    int32_t  tz_offset_s;
 #if BOARD_OVERLAY_PARTIAL
     /* Raw "overlay_values" object from the response, "" when absent. Same
      * semantics as the polled values document (overlay.h); newest seq wins. */

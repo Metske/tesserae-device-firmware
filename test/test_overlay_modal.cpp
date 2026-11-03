@@ -246,10 +246,13 @@ static void test_overlay_modal_gestures_and_restore(void)
     tel.cache_total_bytes = 6 * 1024 * 1024;
     tel.cached_item_count = 2;
     tel.live_wifi_enabled = false;
+    snprintf(tel.sync_status, sizeof(tel.sync_status), "Synced 15m ago (06:00)");
 
     overlay_modal_t modal;
     omodal_init(&modal, W, H);
     omodal_set_context(&modal, &dm, NULL, "fa676006ab71", 0, &tel);
+    CHECK(strcmp(modal.telemetry.sync_status, "Synced 15m ago (06:00)") == 0,
+          "modal telemetry preserves sync_status string");
 
     /* 2. Middle button (GPIO3) hold >= 4000 ms -> BLE maintenance (does not open modal) */
     fi_dirty_rect_t dirty = {0, 0, 0, 0, false};

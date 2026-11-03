@@ -92,6 +92,7 @@ idf_component_register(
         "collection_cache.c"
         "deck_run.c"
         "collection_run.c"
+        "sync_scheduler.c"
         "interactive_session.c"
         "session_run.c"
         "freeink_compositor.cpp"

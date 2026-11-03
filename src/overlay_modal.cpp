@@ -114,19 +114,22 @@ static ActionEvent buildAndRouteModal(overlay_modal_t *m,
 
     uint32_t used_kb = m->telemetry.cache_used_bytes / 1024u;
     uint32_t total_kb = m->telemetry.cache_total_bytes / 1024u;
+    const char *sync_lbl = m->telemetry.sync_status[0] ? m->telemetry.sync_status : "Synced";
     if (m->telemetry.has_sht4x) {
         snprintf(sc->tel_line, sizeof(sc->tel_line),
-                 "Env: %.1f C / %.0f%% RH   |   Flash Cache: %u / %u KB (%d items)   |   Wi-Fi: %s",
+                 "Env: %.1f C / %.0f%% RH  |  Cache: %u/%u KB (%d)  |  %s  |  Wi-Fi: %s",
                  (double)m->telemetry.temperature_c,
                  (double)m->telemetry.humidity_pct,
                  (unsigned)used_kb, (unsigned)total_kb,
                  m->telemetry.cached_item_count,
+                 sync_lbl,
                  m->telemetry.live_wifi_enabled ? "LIVE" : "OFF");
     } else {
         snprintf(sc->tel_line, sizeof(sc->tel_line),
-                 "Flash Cache: %u / %u KB (%d items)   |   Wi-Fi: %s",
+                 "Cache: %u/%u KB (%d items)  |  %s  |  Wi-Fi: %s",
                  (unsigned)used_kb, (unsigned)total_kb,
                  m->telemetry.cached_item_count,
+                 sync_lbl,
                  m->telemetry.live_wifi_enabled ? "LIVE" : "OFF");
     }
     TextStyle telStyle;

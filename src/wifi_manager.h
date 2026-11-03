@@ -22,6 +22,10 @@ typedef struct {
     bool secure;
 } wifi_network_t;
 
+/* Initialise NVS flash only (no esp-netif or esp-wifi bring-up). Idempotent.
+ * Used on radio-off wakes so NVS config is readable with Wi-Fi uninitialised. */
+esp_err_t wifi_manager_nvs_init(void);
+
 /* Initialise NVS + esp-netif + esp-event. Idempotent. */
 esp_err_t wifi_manager_init(void);
 

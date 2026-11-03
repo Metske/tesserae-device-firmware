@@ -61,6 +61,10 @@ typedef struct {
     char    collection_synced_ver[FC_VERSION_CAP];
     char    collection_srv_ver[FC_VERSION_CAP];
     char    tz[40];               /* IANA timezone (server config; proto2 status body) */
+    int32_t tz_offset_s;          /* UTC offset seconds from server status/bundle */
+    char    scheduled_sync_hhmm[8]; /* Daily Scheduled Sync local time "HH:MM" (default "06:00") */
+    int32_t passive_refresh_s;    /* Radio-off Passive Refresh interval (0 = disabled) */
+    int64_t last_sync_epoch;      /* Last successful sync Unix epoch seconds */
     bool    always_on;            /* server config: kiosk mode (no deep sleep on
                                    * this device; SSE push viable). Admin choice
                                    * -- the firmware adds only a low-battery
@@ -201,6 +205,9 @@ void rest_config_set_collection_srv_ver(const char *version);
 /* IANA timezone string from server config (proto2: echoed on every /status).
  * Cache mutator like the rest; persist with rest_config_save(). */
 void rest_config_set_tz(const char *tz);
+void rest_config_set_tz_offset_s(int32_t offset_s);
+void rest_config_set_sync_policy(const char *hhmm, int32_t passive_refresh_s);
+void rest_config_set_last_sync_epoch(int64_t epoch);
 
 /* Kiosk (always-on) flag from server config. Persist with rest_config_save. */
 void rest_config_set_always_on(bool on);

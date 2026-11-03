@@ -6,6 +6,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -29,6 +30,8 @@
 #include "overlay_modal.h"
 #include "rest_config.h"
 #include "sht4x.h"
+#include "sync_scheduler.h"
+#include "wifi_manager.h"
 
 static const char *TAG = "isess";
 
@@ -73,6 +76,7 @@ typedef struct {
     bool                  overlay_repaint_gc16;
     fi_dirty_rect_t       overlay_dirty;
     bool                  live_wifi_enabled;
+    bool                  wifi_toggle_pending;
 } session_runtime_t;
 
 static int64_t now_ms(void)
@@ -304,6 +308,17 @@ static void sample_session_telemetry_unlocked(session_runtime_t *rt)
         tel->cached_item_count = rt->sess.collection->n_frames;
     }
     tel->live_wifi_enabled = rt->live_wifi_enabled;
+
+    const rest_config_t *rc = rest_config_get();
+    sync_scheduler_t sched;
+    sync_sched_init(&sched);
+    sync_sched_set_policy(&sched, rc->scheduled_sync_hhmm,
+                          rc->passive_refresh_s, rc->tz_offset_s);
+    if (rc->last_sync_epoch > 0) {
+        sync_sched_note_sync_success(&sched, rc->last_sync_epoch);
+    }
+    sync_sched_format_status(&sched, (int64_t)time(NULL),
+                             tel->sync_status, sizeof(tel->sync_status));
 }
 
 static void populate_modal_telemetry_locked(session_runtime_t *rt)
@@ -771,6 +786,7 @@ static void handle_modal_action_locked(session_runtime_t *rt,
         act == OMODAL_ACT_TOGGLE_LIVE_WIFI) {
         if (act == OMODAL_ACT_TOGGLE_LIVE_WIFI) {
             rt->live_wifi_enabled = rt->modal.telemetry.live_wifi_enabled;
+            rt->wifi_toggle_pending = true;
         }
         queue_overlay_dirty_locked(rt, dirty, false);
         xSemaphoreGive(rt->work_sem);
@@ -997,7 +1013,20 @@ static void run_session_loop(session_runtime_t *rt,
                             xSemaphoreGive(rt->work_sem);
                         }
                     }
+                    bool do_wifi_toggle = rt->wifi_toggle_pending;
+                    bool want_wifi = rt->live_wifi_enabled;
+                    rt->wifi_toggle_pending = false;
                     xSemaphoreGive(rt->mux);
+
+                    if (do_wifi_toggle) {
+                        if (want_wifi) {
+                            ESP_LOGI(TAG, "Live Wi-Fi toggle enabled in session; connecting STA");
+                            (void)wifi_sta_connect_stored();
+                        } else {
+                            ESP_LOGI(TAG, "Live Wi-Fi toggle disabled in session; stopping STA");
+                            wifi_sta_stop();
+                        }
+                    }
                 }
             }
         }
@@ -1007,6 +1036,11 @@ static void run_session_loop(session_runtime_t *rt,
     }
 
     xSemaphoreTake(rt->done_sem, portMAX_DELAY);
+    if (rt->live_wifi_enabled && !(*fallthrough) && !(*maintenance_requested)) {
+        ESP_LOGI(TAG, "session ending; stopping Live Wi-Fi STA before deep sleep");
+        wifi_sta_stop();
+        rt->live_wifi_enabled = false;
+    }
 }
 
 static bool launch_validated_session(session_runtime_t *rt,

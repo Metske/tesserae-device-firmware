@@ -101,9 +101,11 @@ bool wifi_manager_wait_ip6_routable(uint32_t timeout_ms)
     return (bits & BIT_IP6_ROUT) != 0;
 }
 
-esp_err_t wifi_manager_init(void)
+static bool s_nvs_inited = false;
+
+esp_err_t wifi_manager_nvs_init(void)
 {
-    if (s_inited) return ESP_OK;
+    if (s_nvs_inited) return ESP_OK;
 
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -111,6 +113,15 @@ esp_err_t wifi_manager_init(void)
         err = nvs_flash_init();
     }
     ESP_ERROR_CHECK(err);
+    s_nvs_inited = true;
+    return ESP_OK;
+}
+
+esp_err_t wifi_manager_init(void)
+{
+    if (s_inited) return ESP_OK;
+
+    ESP_ERROR_CHECK(wifi_manager_nvs_init());
 
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
@@ -242,6 +253,7 @@ esp_err_t wifi_scan_networks(wifi_network_t *out, size_t cap, size_t *count)
 {
     if (count) *count = 0;
     if (!out || cap == 0) return ESP_ERR_INVALID_ARG;
+    ESP_ERROR_CHECK(wifi_manager_init());
     if (!ensure_sta_netif()) return ESP_ERR_NO_MEM;
 
     s_autoconnect = false;
@@ -389,6 +401,7 @@ static esp_err_t connect_once(const char *ssid, const char *pass,
                               wifi_cancel_fn cancelled)
 {
     if (cancelled && cancelled()) return ESP_ERR_INVALID_STATE;
+    ESP_ERROR_CHECK(wifi_manager_init());
     if (s_events) vEventGroupDelete(s_events);
     s_events = xEventGroupCreate();
     if (!s_events) return ESP_ERR_NO_MEM;
@@ -480,6 +493,7 @@ esp_err_t wifi_sta_connect_stored_cancellable(wifi_cancel_fn cancelled)
 
 void wifi_sta_stop(void)
 {
+    if (!s_inited) return;
     s_autoconnect = false;   /* stop the disconnect handler from retrying */
     esp_wifi_disconnect();
     esp_wifi_stop();

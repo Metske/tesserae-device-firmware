@@ -60,6 +60,7 @@ typedef struct {
     uint32_t cache_total_bytes;
     int      cached_item_count;
     bool     live_wifi_enabled;
+    char     sync_status[48];
 } omodal_telemetry_t;
 
 typedef struct {

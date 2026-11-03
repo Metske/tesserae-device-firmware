@@ -28,6 +28,10 @@ static const char *TAG = "rest_cfg";
 #define NVS_KEY_COL_SV     "col_sv"     /* fully cached manifest version */
 #define NVS_KEY_COL_RV     "col_rv"     /* last server-announced version */
 #define NVS_KEY_TZ         "tz"         /* IANA timezone (proto2) */
+#define NVS_KEY_TZ_OFS     "tz_ofs"     /* UTC offset seconds */
+#define NVS_KEY_SYNC_HHMM  "sync_hhmm"  /* Scheduled Sync local HH:MM */
+#define NVS_KEY_PASS_REF   "pass_ref"   /* Passive Refresh interval seconds */
+#define NVS_KEY_SYNC_EP    "sync_ep"    /* Last successful sync epoch */
 #define NVS_KEY_KIOSK      "kiosk"      /* always-on power policy */
 #define NVS_KEY_AWAKE_S    "awake_s"    /* poll cadence while always-on */
 /* Cloud relay (docs/relay/contract.md). Short keys: NVS caps them at 15 chars. */
@@ -83,6 +87,8 @@ void rest_config_load(void)
     memset(&s_cfg, 0, sizeof s_cfg);
     s_cfg.sleep_s = SLEEP_INTERVAL_S;
     s_cfg.awake_poll_s = AWAKE_POLL_DEFAULT_S;
+    set_str(s_cfg.scheduled_sync_hhmm, sizeof s_cfg.scheduled_sync_hhmm, "06:00");
+    s_cfg.passive_refresh_s = 0;
 #ifdef BOARD_FRONTLIGHT_M5PM1
     s_cfg.frontlight_pct = 0;
 #endif
@@ -151,6 +157,15 @@ void rest_config_load(void)
         load_str(h, NVS_KEY_COL_RV, s_cfg.collection_srv_ver,
                  sizeof s_cfg.collection_srv_ver);
         load_str(h, NVS_KEY_TZ, s_cfg.tz, sizeof s_cfg.tz);
+        int32_t tzo = 0;
+        if (nvs_get_i32(h, NVS_KEY_TZ_OFS, &tzo) == ESP_OK) s_cfg.tz_offset_s = tzo;
+        char shhmm[sizeof s_cfg.scheduled_sync_hhmm];
+        load_str(h, NVS_KEY_SYNC_HHMM, shhmm, sizeof shhmm);
+        if (shhmm[0]) set_str(s_cfg.scheduled_sync_hhmm, sizeof s_cfg.scheduled_sync_hhmm, shhmm);
+        int32_t pref = 0;
+        if (nvs_get_i32(h, NVS_KEY_PASS_REF, &pref) == ESP_OK && pref >= 0) s_cfg.passive_refresh_s = pref;
+        int64_t sep = 0;
+        if (nvs_get_i64(h, NVS_KEY_SYNC_EP, &sep) == ESP_OK && sep > 0) s_cfg.last_sync_epoch = sep;
         uint8_t ko = 0;
         if (nvs_get_u8(h, NVS_KEY_KIOSK, &ko) == ESP_OK) s_cfg.always_on = (ko != 0);
         int32_t aw = 0;
@@ -260,6 +275,10 @@ esp_err_t rest_config_save(void)
     if (err == ESP_OK) err = nvs_set_str(h, NVS_KEY_COL_RV,
                                          s_cfg.collection_srv_ver);
     if (err == ESP_OK) err = nvs_set_str(h, NVS_KEY_TZ, s_cfg.tz);
+    if (err == ESP_OK) err = nvs_set_i32(h, NVS_KEY_TZ_OFS, s_cfg.tz_offset_s);
+    if (err == ESP_OK) err = nvs_set_str(h, NVS_KEY_SYNC_HHMM, s_cfg.scheduled_sync_hhmm);
+    if (err == ESP_OK) err = nvs_set_i32(h, NVS_KEY_PASS_REF, s_cfg.passive_refresh_s);
+    if (err == ESP_OK) err = nvs_set_i64(h, NVS_KEY_SYNC_EP, s_cfg.last_sync_epoch);
     if (err == ESP_OK) err = nvs_set_u8(h, NVS_KEY_KIOSK, s_cfg.always_on ? 1 : 0);
     if (err == ESP_OK) err = nvs_set_i32(h, NVS_KEY_AWAKE_S, s_cfg.awake_poll_s);
     if (err == ESP_OK) err = nvs_set_str(h, NVS_KEY_RLY_URL,  s_cfg.relay_url);
@@ -407,6 +426,30 @@ void rest_config_set_collection_srv_ver(const char *version)
 void rest_config_set_tz(const char *tz)
 {
     set_str(s_cfg.tz, sizeof s_cfg.tz, tz ? tz : "");
+}
+
+void rest_config_set_tz_offset_s(int32_t offset_s)
+{
+    if (offset_s >= -86400 && offset_s <= 86400) {
+        s_cfg.tz_offset_s = offset_s;
+    }
+}
+
+void rest_config_set_sync_policy(const char *hhmm, int32_t passive_refresh_s)
+{
+    if (hhmm && hhmm[0]) {
+        set_str(s_cfg.scheduled_sync_hhmm, sizeof s_cfg.scheduled_sync_hhmm, hhmm);
+    }
+    if (passive_refresh_s >= 0 && passive_refresh_s <= 86400) {
+        s_cfg.passive_refresh_s = passive_refresh_s;
+    }
+}
+
+void rest_config_set_last_sync_epoch(int64_t epoch)
+{
+    if (epoch > 0) {
+        s_cfg.last_sync_epoch = epoch;
+    }
 }
 
 void rest_config_set_always_on(bool on)

@@ -1278,6 +1278,23 @@ rest_status_t rest_post_status(int rssi, const char *ip,
             rest_config_set_tz(tz);
             rest_config_save();
         }
+        cJSON *cfg_sp = cJSON_GetObjectItemCaseSensitive(cfg, "sync_policy");
+        if (cJSON_IsObject(cfg_sp)) {
+            out->sync_policy_present = true;
+            json_get_str(cfg_sp, "scheduled_sync_local_hhmm",
+                         out->scheduled_sync_hhmm, sizeof out->scheduled_sync_hhmm);
+            out->passive_refresh_s = json_get_int(cfg_sp, "passive_refresh_s", 0);
+        } else {
+            char shhmm[8] = {0};
+            json_get_str(cfg, "scheduled_sync_local_hhmm", shhmm, sizeof shhmm);
+            int32_t pref = json_get_int(cfg, "passive_refresh_s", -1);
+            if (shhmm[0] || pref >= 0) {
+                out->sync_policy_present = true;
+                snprintf(out->scheduled_sync_hhmm, sizeof out->scheduled_sync_hhmm,
+                         "%s", shhmm[0] ? shhmm : c->scheduled_sync_hhmm);
+                out->passive_refresh_s = (pref >= 0) ? pref : c->passive_refresh_s;
+            }
+        }
         /* always_on is SERVER CONFIG, on the same channel as sleep_interval_s:
          * true = run without deep sleep (kiosk: GT911 stays hot and the SSE
          * state stream is held), false = the normal sleep cycle. Read every
@@ -1345,6 +1362,32 @@ rest_status_t rest_post_status(int rssi, const char *ip,
         }
     }
 #endif
+    cJSON *top_sp = cJSON_GetObjectItemCaseSensitive(r, "sync_policy");
+    if (cJSON_IsObject(top_sp)) {
+        out->sync_policy_present = true;
+        json_get_str(top_sp, "scheduled_sync_local_hhmm",
+                     out->scheduled_sync_hhmm, sizeof out->scheduled_sync_hhmm);
+        out->passive_refresh_s = json_get_int(top_sp, "passive_refresh_s", 0);
+    }
+    cJSON *tzo = cJSON_GetObjectItemCaseSensitive(r, "tz_offset_seconds");
+    if (cJSON_IsNumber(tzo)) {
+        out->tz_offset_present = true;
+        out->tz_offset_s = (int32_t)tzo->valuedouble;
+        if (out->tz_offset_s != c->tz_offset_s) {
+            rest_config_set_tz_offset_s(out->tz_offset_s);
+            rest_config_save();
+        }
+    }
+    if (out->sync_policy_present) {
+        const char *nhhmm = out->scheduled_sync_hhmm[0]
+                                ? out->scheduled_sync_hhmm
+                                : c->scheduled_sync_hhmm;
+        if (strcmp(nhhmm, c->scheduled_sync_hhmm) != 0 ||
+            out->passive_refresh_s != c->passive_refresh_s) {
+            rest_config_set_sync_policy(nhhmm, out->passive_refresh_s);
+            rest_config_save();
+        }
+    }
     /* Deck resync signal: "deck": {"version": str}. Absent on servers that
      * don't speak decks yet; the sync tail then never runs. */
     cJSON *deck = cJSON_GetObjectItemCaseSensitive(r, "deck");

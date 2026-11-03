@@ -87,6 +87,7 @@
 #include "splash.h"
 #include "wifi_manager.h"
 #include "session_run.h"
+#include "sync_scheduler.h"
 
 static const char *TAG = "main";
 
@@ -137,6 +138,31 @@ RTC_NOINIT_ATTR static uint64_t s_button_event_seq;
 /* One-shot deep-sleep interval override (seconds); 0 = use the server interval.
  * Set before sleep to schedule a shorter WiFi retry backoff. */
 static int32_t s_sleep_override_s = 0;
+
+/* Offline-first Scheduled Sync + radio-off Passive Refresh scheduler (ADR-0005,
+ * Ticket #5 / T4). Retained across deep sleep in RTC slow memory and mirrored
+ * in rest_config NVS across resets. */
+RTC_DATA_ATTR static sync_scheduler_t s_sync_sched;
+RTC_DATA_ATTR static uint8_t          s_sync_sched_inited;
+
+static bool sync_sched_has_cached_content(void)
+{
+    return deck_has_synced_cache() || (collection_active_manifest() != NULL);
+}
+
+static void sync_sched_sync_from_config(void)
+{
+    const rest_config_t *rc = rest_config_get();
+    if (!s_sync_sched_inited) {
+        sync_sched_init(&s_sync_sched);
+        s_sync_sched_inited = 1;
+        if (rc->last_sync_epoch > 0) {
+            sync_sched_note_sync_success(&s_sync_sched, rc->last_sync_epoch);
+        }
+    }
+    sync_sched_set_policy(&s_sync_sched, rc->scheduled_sync_hhmm,
+                          rc->passive_refresh_s, rc->tz_offset_s);
+}
 
 /* proto2_run mints its /tap event ids off the same counter every other
  * input event uses (contract: one uint64 stream per boot). */
@@ -802,6 +828,13 @@ static void sleep_forever_or_until_timer(void)
          * paint time since the response doesn't push the wake late.
          * No-op without a target; a collection-shortened interval wins. */
         interval = wake_align_sleep_s(interval);
+        sync_sched_sync_from_config();
+        if (sync_sched_has_cached_content() &&
+            (s_sync_sched.passive_refresh_s > 0 || s_sync_sched.retry_count > 0 ||
+             s_sync_sched.missed_sync)) {
+            interval = sync_sched_next_sleep_s(&s_sync_sched,
+                                               (int64_t)time(NULL), interval);
+        }
     }
     ESP_LOGI(TAG, "on battery; deep sleep for %d s%s",
              interval,
@@ -2242,6 +2275,7 @@ static void enter_ble_maintenance_from_awake_window(void)
     ESP_LOGI(TAG, "awake-window Refresh hold: entering BLE maintenance");
     rest_set_button(NULL, 0);
     wifi_sta_stop();
+    ESP_ERROR_CHECK(wifi_manager_init());
     ble_setup_result_t result = ble_setup_run(
         BLE_SETUP_MODE_MAINTENANCE, BLE_SETUP_TIMEOUT_S);
     if (apply_ble_result(result)) return;   /* action paths restart */
@@ -3246,10 +3280,15 @@ void app_main(void)
         maybe_show_splash(reset_reason, wifi_creds_present());
     }
 
-    ESP_ERROR_CHECK(wifi_manager_init());
+    /* Lazy radio init (ADR-0005, Ticket #5 / T4): initialize NVS only here so
+     * radio-off interactive wakes and radio-off Passive Refresh timer wakes
+     * never initialize esp_netif / esp_wifi. wifi_manager_init() is called on
+     * demand when BLE or Wi-Fi is actually entered below. */
+    ESP_ERROR_CHECK(wifi_manager_nvs_init());
     rest_config_load();
 
     if (maintenance_requested) {
+        ESP_ERROR_CHECK(wifi_manager_init());
         /* The entry/exit gesture belongs to the local session, not a server
          * button or cached-deck navigation action on the resumed wake cycle. */
         rest_set_button(NULL, 0);
@@ -3275,6 +3314,7 @@ void app_main(void)
      * keeps the established AP-first onboarding path below. */
     if (registered_wifi_recovery_needed() && !maintenance_requested) {
         ESP_LOGI(TAG, "registered display has no Wi-Fi; opening BLE recovery first");
+        ESP_ERROR_CHECK(wifi_manager_init());
         ble_setup_result_t result = ble_setup_run(
             BLE_SETUP_MODE_MAINTENANCE, BLE_SETUP_TIMEOUT_S);
         if (apply_ble_result(result)) return;
@@ -3291,6 +3331,29 @@ void app_main(void)
      * nav state. Everything degrades to a no-op without a card. */
     deck_boot();
     collection_boot();
+    sync_sched_sync_from_config();
+
+    /* Radio-off Passive Refresh timer wake (ADR-0005, Ticket #5 / T4): when a
+     * timer wake is classified as SYNC_ACT_PASSIVE_REFRESH_RADIO_OFF, cycle the
+     * cached Collection or Deck page locally and return to deep sleep without
+     * ever initializing esp_wifi. */
+    if (!first_boot && !woke_by_button && !settings_mode &&
+        !rest_config_get()->always_on &&
+        esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER) {
+        int64_t wake_ep = (int64_t)time(NULL);
+        sync_wake_action_t wa = sync_sched_decide_wake(
+            &s_sync_sched, SYNC_WAKE_TIMER,
+            sync_sched_has_cached_content(), wake_ep);
+        if (wa == SYNC_ACT_PASSIVE_REFRESH_RADIO_OFF) {
+            bool painted_local = collection_try_local_cycle() ||
+                                 deck_try_passive_refresh();
+            if (painted_local) {
+                ESP_LOGI(TAG, "passive refresh wake complete (radio off); back to sleep");
+                sleep_forever_or_until_timer();
+                return;   /* not reached */
+            }
+        }
+    }
 
     /* An Album-only timer wake can paint a due cached photo and return to
      * sleep without starting WiFi. Manual/button/touch wakes always continue
@@ -3475,7 +3538,8 @@ void app_main(void)
     }
 #endif
 
-    bool have_creds = wifi_creds_present();   /* the splash already ran, above wifi_manager_init() */
+    bool have_creds = wifi_creds_present();   /* the splash already ran, above wifi_nvs_init() */
+    ESP_ERROR_CHECK(wifi_manager_init());
 
     /* The captive portal collects WiFi plus ONE transport, so a device missing
      * either is not yet usable -- send it to provisioning.
@@ -3526,6 +3590,25 @@ void app_main(void)
          * likely problem. */
         bool onboarded = rest_config_get()->device_token[0] != '\0' ||
                          relay_ready();
+        /* Offline-First Scheduled Sync bounded 2x +30 min retry (ADR-0005):
+         * when the device holds a valid cached Deck or Frame Collection and this
+         * is a background/timer sync wake (not a manual setup reopen), bound
+         * retries to at most 2 attempts (+30 min each) and then defer until the
+         * next day's Scheduled Sync without opening the SoftAP portal. */
+        if (onboarded && sync_sched_has_cached_content() &&
+            !woke_by_button && !s_outage_user_reopen) {
+            sync_sched_note_sync_failure(&s_sync_sched, (int64_t)time(NULL));
+            int32_t next_s = sync_sched_next_sleep_s(&s_sync_sched,
+                                                     (int64_t)time(NULL),
+                                                     effective_sleep_s());
+            ESP_LOGW(TAG, "Scheduled Sync STA connect failed (%s); retry=%u missed=%d, sleeping %lds (radio off, cached content preserved)",
+                     esp_err_to_name(err), (unsigned)s_sync_sched.retry_count,
+                     (int)s_sync_sched.missed_sync, (long)next_s);
+            wifi_sta_stop();
+            s_sleep_override_s = next_s;
+            sleep_forever_or_until_timer();
+            return;
+        }
         if (s_outage_portal_fp && s_outage_portal_fp != wifi_creds_fingerprint()) {
             ESP_LOGI(TAG, "Wi-Fi credentials changed since the portal expired; "
                           "leaving outage retry mode");
@@ -4069,6 +4152,14 @@ void app_main(void)
                 so.collection_present, collection_id, collection_kind,
                 collection_srv_ver);
             collection_network_polled(effective_sleep_s());
+            {
+                int64_t sync_ep = (so.server_time > 0)
+                                      ? (int64_t)so.server_time
+                                      : (int64_t)time(NULL);
+                sync_sched_note_sync_success(&s_sync_sched, sync_ep);
+                rest_config_set_last_sync_epoch(sync_ep);
+                cfg_dirty = true;
+            }
 #if TESSERAE_OTA_CAPABILITY_ENABLED
             if (so.ota_present) {
                 if (so.ota_reason == OTA_VERIFY_OK) {

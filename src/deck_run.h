@@ -18,6 +18,8 @@
 
 const deck_manifest_t *deck_active_manifest(void);
 void deck_note_session_painted(const char *page_id);
+bool deck_has_synced_cache(void);
+bool deck_try_passive_refresh(void);
 
 /* Boot hook, call once after rest_config_load(): probes/mounts the card,
  * advertises the deck_cache capability for this wake's register/status
