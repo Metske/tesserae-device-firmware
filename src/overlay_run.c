@@ -27,7 +27,7 @@
 #include "net_rest.h"
 #include "overlay.h"
 #include "rest_config.h"
-#include "sdcard.h"
+#include "cache_storage.h"
 
 static const char *TAG = "overlay";
 
@@ -97,25 +97,25 @@ static uint8_t *fb_alloc(void)
 
 static bool ov_path(char *out, size_t cap, const char *digest, const char *ext)
 {
-    if (!sdcard_mounted() || !deck_digest_valid(digest)) return false;
-    int n = snprintf(out, cap, SDCARD_MOUNT_POINT "/tesserae/overlay/%s.%s",
+    const char *root = cache_storage_root(); if (!root || !deck_digest_valid(digest)) return false;
+    int n = snprintf(out, cap, "%s/tesserae/overlay/%s.%s", root,
                      digest, ext);
     return n > 0 && n < (int)cap;
 }
 
 static bool atlas_path(char *out, size_t cap, const char *digest)
 {
-    if (!sdcard_mounted() || !deck_digest_valid(digest)) return false;
-    int n = snprintf(out, cap, SDCARD_MOUNT_POINT "/tesserae/overlay/atl/%s.bin",
+    const char *root = cache_storage_root(); if (!root || !deck_digest_valid(digest)) return false;
+    int n = snprintf(out, cap, "%s/tesserae/overlay/atl/%s.bin", root,
                      digest);
     return n > 0 && n < (int)cap;
 }
 
 static void ensure_dirs(void)
 {
-    mkdir(SDCARD_MOUNT_POINT "/tesserae", 0775);
-    mkdir(SDCARD_MOUNT_POINT "/tesserae/overlay", 0775);
-    mkdir(SDCARD_MOUNT_POINT "/tesserae/overlay/atl", 0775);
+    const char *r = cache_storage_root(); char d[128]; if (!r) return; snprintf(d, sizeof d, "%s/tesserae", r); mkdir(d, 0775);
+    snprintf(d, sizeof d, "%s/tesserae/overlay", r); mkdir(d, 0775);
+    snprintf(d, sizeof d, "%s/tesserae/overlay/atl", r); mkdir(d, 0775);
 }
 
 static uint8_t *read_file(const char *path, size_t max, size_t *out_len)
@@ -321,7 +321,7 @@ void overlay_after_paint(const uint8_t *frame, const char *digest)
     if (!spec_usable_for(digest)) return;
 
     /* SD cache: raw spec + rect patches, so the next wake can echo offline. */
-    if (sdcard_mounted()) {
+    if (cache_storage_mounted()) {
         char path[128];
         if (ov_path(path, sizeof path, digest, "spec"))
             write_file(path, s_raw_spec, s_raw_spec_len);
@@ -340,7 +340,7 @@ void overlay_boot(void)
 {
     if (!epd_supports_partial() || s_have_spec) return;
     const char *digest = rest_config_get()->last_frame_etag;
-    if (!sdcard_mounted() || !deck_digest_valid(digest)) return;
+    if (!cache_storage_mounted() || !deck_digest_valid(digest)) return;
 
     char path[128];
     size_t len = 0;

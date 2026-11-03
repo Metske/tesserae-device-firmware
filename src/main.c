@@ -55,6 +55,7 @@
 #include "touch3.h"         /* pure touch-v3 engine (used by TOUCH3_SELFTEST) */
 #include "deck_cache.h"     /* + sdcard.h/deck.h: DECK_SD_SELFTEST round trip */
 #include "sdcard.h"
+#include "cache_storage.h"
 #include "sdmmc_cmd.h"      /* raw-sector benchmark in DECK_SD_SELFTEST */
 #include "esp_heap_caps.h"
 #include "touch_gt911.h"    /* GT911 touch wake (guarded by BOARD_HAS_TOUCH) */
@@ -2314,7 +2315,7 @@ void app_main(void)
     /* Park the SD card's chip-select before ANY code touches the shared SPI
      * bus (selftests included) -- a floating CS with a card fitted disturbs
      * panel refreshes. No-op on boards without a slot. See sdcard.h. */
-    sdcard_quiesce();
+    cache_storage_quiesce();
 
     /* NVS up front, because the button beep below is the first thing that asks
      * rest_config_get() for an answer and it cannot get a true one otherwise:

@@ -144,6 +144,7 @@
  * with its own CS. DET low = card present. NOTE: this model's slot power
  * gate is GPIO39, not 16 like the other reTerminals (Seeed cookbook table). */
 #define TESSERAE_SD_SLOT   1
+#define TESSERAE_FLASH_CACHE 1
 #define SD_SPI_SHARED_BUS  1
 #define SD_SPI_MAX_KHZ 4000
 #define SD_PIN_MISO   8

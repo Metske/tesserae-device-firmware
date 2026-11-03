@@ -28,7 +28,7 @@
 #include "overlay_run.h"       /* work framebuffer + partial refresh */
 #include "panel/epd_panel.h"   /* epd_active_driver()->info.bpp */
 #include "rest_config.h"
-#include "sdcard.h"
+#include "cache_storage.h"
 #include "touch3.h"
 
 static const char *TAG = "touch3";
@@ -46,7 +46,7 @@ static const char *TAG = "touch3";
 #define T3_DRAG_MIN_US  (350 * 1000)  /* min gap between live-drag DU refreshes */
 #define T3_DRAG_IDLE_US (2000 * 1000) /* older than this = a new stroke */
 
-#define T3_DIR          SDCARD_MOUNT_POINT "/tesserae/touch3"
+/* T3_DIR resolved dynamically via cache_storage_root() */
 
 /* Minted by main.c (the single wake-event counter, uint64, <= 2^53). */
 extern uint64_t app_next_event_id(void);
@@ -132,21 +132,21 @@ static bool digest_safe(const char *d)
 
 static void ensure_dirs(void)
 {
-    mkdir(SDCARD_MOUNT_POINT "/tesserae", 0775);
-    mkdir(T3_DIR, 0775);
+    const char *r = cache_storage_root(); char d[128]; if (!r) return; snprintf(d, sizeof d, "%s/tesserae", r); mkdir(d, 0775);
+    snprintf(d, sizeof d, "%s/tesserae/touch3", r); mkdir(d, 0775);
 }
 
 static bool spec_path(char *out, size_t cap, const char *layout)
 {
-    if (!sdcard_mounted() || !digest_safe(layout)) return false;
-    int n = snprintf(out, cap, T3_DIR "/%s.spec", layout);
+    const char *r = cache_storage_root(); if (!r || !digest_safe(layout)) return false;
+    int n = snprintf(out, cap, "%s/tesserae/touch3/%s.spec", r, layout);
     return n > 0 && n < (int)cap;
 }
 
 static bool atlas_path(char *out, size_t cap, const char *digest)
 {
-    if (!sdcard_mounted() || !digest_safe(digest)) return false;
-    int n = snprintf(out, cap, T3_DIR "/atlas-%s.bin", digest);
+    const char *r = cache_storage_root(); if (!r || !digest_safe(digest)) return false;
+    int n = snprintf(out, cap, "%s/tesserae/touch3/atlas-%s.bin", r, digest);
     return n > 0 && n < (int)cap;
 }
 
@@ -154,9 +154,9 @@ static bool atlas_path(char *out, size_t cap, const char *digest)
  * radio comes up. */
 static void write_current(const char *layout)
 {
-    if (!sdcard_mounted() || !digest_safe(layout)) return;
+    const char *r = cache_storage_root(); char cp[144]; if (!r || !digest_safe(layout)) return; snprintf(cp, sizeof cp, "%s/tesserae/touch3/current", r);
     ensure_dirs();
-    FILE *f = fopen(T3_DIR "/current", "wb");
+    FILE *f = fopen(cp, "wb");
     if (!f) return;
     fwrite(layout, 1, strlen(layout), f);
     fclose(f);
@@ -165,8 +165,8 @@ static void write_current(const char *layout)
 static bool read_current(char *out, size_t cap)
 {
     out[0] = '\0';
-    if (!sdcard_mounted()) return false;
-    FILE *f = fopen(T3_DIR "/current", "rb");
+    const char *r = cache_storage_root(); char cp[144]; if (!r) return false; snprintf(cp, sizeof cp, "%s/tesserae/touch3/current", r);
+    FILE *f = fopen(cp, "rb");
     if (!f) return false;
     size_t n = fread(out, 1, cap - 1, f);
     fclose(f);

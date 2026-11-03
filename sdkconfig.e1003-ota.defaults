@@ -1,0 +1,4 @@
+# E1003 partition override layered after sdkconfig.ota.defaults so clean builds
+# always select partitions_e1003_ota.csv (dual 4 MiB OTA + 7.81 MiB flash_cache).
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_e1003_ota.csv"

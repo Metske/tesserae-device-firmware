@@ -86,6 +86,8 @@ idf_component_register(
         "deck.c"
         "frame_collection.c"
         "deck_digest.c"
+        "frame_codec.c"
+        "cache_storage.c"
         "deck_cache.c"
         "collection_cache.c"
         "deck_run.c"
@@ -119,6 +121,7 @@ idf_component_register(
         esp_wifi
         esp-tls
         fatfs
+        wear_levelling
         json
         nvs_flash
         mbedtls

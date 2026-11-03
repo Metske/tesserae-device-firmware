@@ -1,0 +1,14 @@
+# Seeed reTerminal E1003 A/B OTA + internal Flash Cache layout (>= 16 MB flash).
+#
+# Retains the factory NVS/PHY/OTA offsets so USB/OTA migration preserves Wi-Fi
+# credentials and device registration, and places a 7.81 MiB wear-levelled FATFS
+# Flash Cache partition immediately after coredump (0x830000 .. 0x1000000).
+#
+# Name,        Type, SubType,  Offset,    Size,      Flags
+nvs,           data, nvs,      0x9000,    0x6000,
+phy_init,      data, phy,      0xf000,    0x1000,
+otadata,       data, ota,      0x10000,   0x2000,
+ota_0,         app,  ota_0,    0x20000,   0x400000,
+ota_1,         app,  ota_1,    0x420000,  0x400000,
+coredump,      data, coredump, 0x820000,  0x10000,
+flash_cache,   data, fat,      0x830000,  0x7D0000,

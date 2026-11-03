@@ -25,7 +25,7 @@
 #include "deck_cache.h"     /* digest-verified SD store (pseudo-deck p2bundle) */
 #include "proto2.h"
 #include "rest_config.h"
-#include "sdcard.h"
+#include "cache_storage.h"
 
 static const char *TAG = "proto2";
 
@@ -62,7 +62,7 @@ static int s_epoch;
  * deck_cache under a reserved pseudo-deck id (digest+length verified,
  * tmp+rename writes, mtime for ttl). */
 #define P2_BUNDLE_DECK "p2bundle"
-#define P2_BUNDLE_JSON SDCARD_MOUNT_POINT "/tesserae/decks/" P2_BUNDLE_DECK                        "/manifest.json"
+/* bundle json path built dynamically via cache_storage_root() */
 static p2_bundle_t s_bundle;
 static bool s_have_bundle;
 static bool s_bundle_sync;              /* sync envelope requested a resync */
@@ -100,8 +100,8 @@ static int s_rq_head, s_rq_len;
 
 static bool man_path(char *out, size_t cap, const char *digest)
 {
-    if (!sdcard_mounted() || !deck_digest_valid(digest)) return false;
-    int n = snprintf(out, cap, SDCARD_MOUNT_POINT "/tesserae/proto2/%s.man",
+    const char *root = cache_storage_root(); if (!root || !deck_digest_valid(digest)) return false;
+    int n = snprintf(out, cap, "%s/tesserae/proto2/%s.man", root,
                      digest);
     return n > 0 && n < (int)cap;
 }
@@ -110,8 +110,8 @@ static void man_cache_write(const char *digest)
 {
     char path[128];
     if (!s_raw_man || !man_path(path, sizeof path, digest)) return;
-    mkdir(SDCARD_MOUNT_POINT "/tesserae", 0775);
-    mkdir(SDCARD_MOUNT_POINT "/tesserae/proto2", 0775);
+    { const char *r = cache_storage_root(); char d1[128], d2[128]; if (r) { snprintf(d1, sizeof d1, "%s/tesserae", r); snprintf(d2, sizeof d2, "%s/tesserae/proto2", r); mkdir(d1, 0775); mkdir(d2, 0775); } }
+    /* proto2 dir ensured above */
     FILE *f = fopen(path, "wb");
     if (!f) return;
     fwrite(s_raw_man, 1, s_raw_man_len, f);
@@ -242,9 +242,9 @@ static void report_or_queue(const p2_report_t *rep)
 
 static bool atlas_path(char *out, size_t cap, const char *digest)
 {
-    if (!sdcard_mounted() || !deck_digest_valid(digest)) return false;
+    const char *root = cache_storage_root(); if (!root || !deck_digest_valid(digest)) return false;
     int n = snprintf(out, cap,
-                     SDCARD_MOUNT_POINT "/tesserae/proto2/atlas-%s.bin",
+                     "%s/tesserae/proto2/atlas-%s.bin", root,
                      digest);
     return n > 0 && n < (int)cap;
 }
@@ -315,8 +315,8 @@ static void load_atlases(void)
             }
             bits = img.data;
             if (atlas_path(path, sizeof path, a->digest)) {
-                mkdir(SDCARD_MOUNT_POINT "/tesserae", 0775);
-                mkdir(SDCARD_MOUNT_POINT "/tesserae/proto2", 0775);
+                { const char *r = cache_storage_root(); char d1[128], d2[128]; if (r) { snprintf(d1, sizeof d1, "%s/tesserae", r); snprintf(d2, sizeof d2, "%s/tesserae/proto2", r); mkdir(d1, 0775); mkdir(d2, 0775); } }
+                /* proto2 dir ensured above */
                 FILE *f = fopen(path, "wb");
                 if (f) { fwrite(bits, 1, want, f); fclose(f); }
             }
@@ -425,8 +425,8 @@ static void bundle_track_page(const char *frame_digest)
 
 static void bundle_restore_sd(void)
 {
-    if (!sdcard_mounted()) return;
-    FILE *f = fopen(P2_BUNDLE_JSON, "rb");
+    const char *root = cache_storage_root(); if (!root) return; char bpath[160]; snprintf(bpath, sizeof bpath, "%s/tesserae/decks/" P2_BUNDLE_DECK "/manifest.json", root);
+    FILE *f = fopen(bpath, "rb");
     if (!f) return;
     char *buf = malloc(P2_MANIFEST_MAX);
     if (!buf) { fclose(f); return; }

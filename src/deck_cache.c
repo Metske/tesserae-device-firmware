@@ -1,174 +1,58 @@
-/* deck_cache.c -- SD-card file layer for the deck frame cache. See header. */
+/* deck_cache.c -- Unified VFS file layer for the compressed deck frame cache. */
+
+#ifndef ESP_PLATFORM
+#define _POSIX_C_SOURCE 200809L
+#endif
 
 #include "deck_cache.h"
-#include "app_config.h"
 
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <fcntl.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
+#include "cache_storage.h"
+#include "frame_codec.h"
+
+#ifdef ESP_PLATFORM
+#include "app_config.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
-
-#include "sdcard.h"
+#include "esp_timer.h"
+#else
+static inline void deck_log_noop(const char *tag, const char *fmt, ...)
+{
+    (void)tag;
+    (void)fmt;
+}
+#define ESP_LOGW deck_log_noop
+#define ESP_LOGI deck_log_noop
+#endif
 
 static const char *TAG = "deck_cache";
 
 /* Manifests are small JSON; cap well above DECK_MAX_PAGES worth of content. */
 #define DECK_MANIFEST_MAX (16 * 1024)
+#define SD_BOUNCE_BYTES   (32 * 1024)
 
-static bool   bounce_write_fd(int fd, const uint8_t *src, size_t len);
-static bool   bounce_read_fd(int fd, uint8_t *dst, size_t cap, size_t *out_len);
-
-/* deck_id becomes a directory name on a user-readable card: restrict it to
- * filesystem-safe chars so a hostile server value cannot traverse paths. */
-static bool deck_id_safe(const char *id)
+static void *fb_alloc(size_t n)
 {
-    if (!id || !id[0] || strlen(id) >= DECK_ID_CAP) return false;
-    for (const char *p = id; *p; p++) {
-        bool ok = (*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
-                  (*p >= '0' && *p <= '9') || *p == '-' || *p == '_';
-        if (!ok) return false;
-    }
-    return true;
+#ifdef ESP_PLATFORM
+    void *p = heap_caps_malloc(n, TESSERAE_FB_CAPS);
+    if (p) return p;
+#endif
+    return malloc(n);
 }
 
-static bool deck_dir(const char *deck_id, char *out, size_t cap)
-{
-    if (!sdcard_mounted() || !deck_id_safe(deck_id)) return false;
-    int n = snprintf(out, cap, SDCARD_MOUNT_POINT "/tesserae/decks/%s", deck_id);
-    return n > 0 && n < (int)cap;
-}
-
-/* mkdir -p for the three fixed levels; EEXIST is success. */
-static bool ensure_deck_dir(const char *deck_id)
-{
-    char path[128];
-    if (!deck_dir(deck_id, path, sizeof path)) return false;
-    const char *levels[] = { SDCARD_MOUNT_POINT "/tesserae",
-                             SDCARD_MOUNT_POINT "/tesserae/decks", path };
-    for (size_t i = 0; i < sizeof levels / sizeof levels[0]; i++) {
-        if (mkdir(levels[i], 0775) != 0 && errno != EEXIST) {
-            ESP_LOGW(TAG, "mkdir %s failed (errno %d)", levels[i], errno);
-            return false;
-        }
-    }
-    return true;
-}
-
-bool deck_cache_load_manifest(const char *deck_id, deck_manifest_t *out)
-{
-    char path[160];
-    if (!deck_dir(deck_id, path, sizeof path)) return false;
-    strlcat(path, "/manifest.json", sizeof path);
-
-    FILE *f = fopen(path, "rb");
-    if (!f) return false;
-
-    char *buf = malloc(DECK_MANIFEST_MAX);
-    if (!buf) { fclose(f); return false; }
-    size_t n = fread(buf, 1, DECK_MANIFEST_MAX, f);
-    bool full = feof(f);
-    fclose(f);
-
-    bool ok = full && n > 0 && deck_manifest_parse(buf, n, out);
-    free(buf);
-    if (!ok) ESP_LOGW(TAG, "cached manifest for %s unreadable; ignoring", deck_id);
-    return ok;
-}
-
-bool deck_cache_save_manifest(const char *deck_id, const char *json, size_t len)
-{
-    if (!json || !len || len > DECK_MANIFEST_MAX) return false;
-    if (!ensure_deck_dir(deck_id)) return false;
-
-    char path[160], tmp[160];
-    if (!deck_dir(deck_id, path, sizeof path)) return false;
-    snprintf(tmp, sizeof tmp, "%s/manifest.tmp", path);
-    strlcat(path, "/manifest.json", sizeof path);
-
-    FILE *f = fopen(tmp, "wb");
-    if (!f) return false;
-    bool ok = fwrite(json, 1, len, f) == len;
-    ok = (fclose(f) == 0) && ok;
-    if (ok) {
-        unlink(path);            /* FATFS rename does not overwrite */
-        ok = rename(tmp, path) == 0;
-    }
-    if (!ok) { unlink(tmp); ESP_LOGW(TAG, "manifest save failed for %s", deck_id); }
-    return ok;
-}
-
-static bool frame_path(const char *deck_id, const char *digest,
-                       char *out, size_t cap)
-{
-    if (!deck_digest_valid(digest)) return false;
-    char dir[128];
-    if (!deck_dir(deck_id, dir, sizeof dir)) return false;
-    int n = snprintf(out, cap, "%s/%s.bin", dir, digest);
-    return n > 0 && n < (int)cap;
-}
-
-bool deck_cache_read_frame(const char *deck_id, const char *digest,
-                           uint32_t expect_bytes, uint8_t **out)
-{
-    *out = NULL;
-    char path[176];
-    if (!frame_path(deck_id, digest, path, sizeof path)) return false;
-
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) return false;
-
-    /* Frames are panel-sized; prefer PSRAM like the network fetch path. */
-    uint8_t *buf = heap_caps_malloc(expect_bytes + 1,
-                                    TESSERAE_FB_CAPS);
-    if (!buf) buf = malloc(expect_bytes + 1);
-    if (!buf) { close(fd); return false; }
-
-    size_t n = 0;
-    bool read_ok = bounce_read_fd(fd, buf, expect_bytes + 1, &n);
-    close(fd);
-
-    if (!read_ok) {
-        ESP_LOGW(TAG, "cached frame %s read failed; keeping it for retry", digest);
-        free(buf);
-        return false;
-    }
-    if (!deck_digest_check(buf, n, expect_bytes, digest)) {
-        ESP_LOGW(TAG, "cached frame %s fails verification; deleting", digest);
-        free(buf);
-        unlink(path);
-        return false;
-    }
-    *out = buf;
-    return true;
-}
-
-/* SD I/O bounce: frame buffers live in PSRAM, which the SD driver cannot DMA
- * from -- it degrades to single-sector transfers, which cost ~123 ms EACH on
- * the E1003's loaded shared bus (bench 2026-07-24: a 1.3 MB write took five
- * minutes). Streaming through an internal DMA-capable chunk keeps everything
- * on the fast multi-sector path (~150-200 KB/s at 4 MHz). */
-#define SD_BOUNCE_BYTES (32 * 1024)
-
-/* POSIX fd I/O, not stdio: newlib's FILE layer refills its (512-byte) buffer
- * per call regardless of request size, which forces the SD driver back onto
- * ~123 ms single-sector transfers (bench: a 1.3 MB fread took 210 s AFTER the
- * write path was fixed). read()/write() pass the full DMA-capable chunk down
- * to FATFS -> multi-sector -> ~150-200 KB/s. */
-/* The bounce chunk must be DMA-capable internal RAM. After Wi-Fi, TLS and the
- * touch/overlay buffers are up, a contiguous SD_BOUNCE_BYTES block is not
- * guaranteed (the PaperMono failed every frame write this way while the
- * boot-time sdtest passed, 2026-09-13), so step down to smaller chunks
- * before giving up, and say why when it fails. */
 static uint8_t *bounce_alloc(size_t *cap)
 {
+#ifdef ESP_PLATFORM
     for (size_t n = SD_BOUNCE_BYTES; n >= 512; n /= 2) {
         uint8_t *p = heap_caps_malloc(n, MALLOC_CAP_DMA);
         if (p) { *cap = n; return p; }
@@ -176,6 +60,11 @@ static uint8_t *bounce_alloc(size_t *cap)
     ESP_LOGW(TAG, "no DMA-capable bounce buffer (largest free %u)",
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA));
     return NULL;
+#else
+    uint8_t *p = malloc(SD_BOUNCE_BYTES);
+    if (p) *cap = SD_BOUNCE_BYTES;
+    return p;
+#endif
 }
 
 static bool bounce_write_fd(int fd, const uint8_t *src, size_t len)
@@ -213,11 +102,188 @@ static bool bounce_read_fd(int fd, uint8_t *dst, size_t cap, size_t *out_len)
         }
         if (n < 0 && errno == EINTR) continue;
         if (n < 0) ok = false;
-        break;                  /* EOF or a real read error */
+        break;
     }
     free(chunk);
     if (out_len) *out_len = total;
     return ok;
+}
+
+/* deck_id becomes a directory name: restrict it to filesystem-safe chars so a
+ * hostile server value cannot traverse paths. */
+static bool deck_id_safe(const char *id)
+{
+    if (!id || !id[0] || strlen(id) >= DECK_ID_CAP) return false;
+    for (const char *p = id; *p; p++) {
+        bool ok = (*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+                  (*p >= '0' && *p <= '9') || *p == '-' || *p == '_';
+        if (!ok) return false;
+    }
+    return true;
+}
+
+static bool deck_dir(const char *deck_id, char *out, size_t cap)
+{
+    const char *root = cache_storage_root();
+    if (!root || !deck_id_safe(deck_id)) return false;
+    int n = snprintf(out, cap, "%s/tesserae/decks/%s", root, deck_id);
+    return n > 0 && n < (int)cap;
+}
+
+/* mkdir -p for the three fixed levels; EEXIST is success. */
+static bool ensure_deck_dir(const char *deck_id)
+{
+    const char *root = cache_storage_root();
+    char l1[256], l2[256], path[256];
+    if (!root || !deck_dir(deck_id, path, sizeof path)) return false;
+    snprintf(l1, sizeof l1, "%s/tesserae", root);
+    snprintf(l2, sizeof l2, "%s/tesserae/decks", root);
+    const char *levels[] = { l1, l2, path };
+    for (size_t i = 0; i < sizeof levels / sizeof levels[0]; i++) {
+        if (mkdir(levels[i], 0775) != 0 && errno != EEXIST) {
+            ESP_LOGW(TAG, "mkdir %s failed (errno %d)", levels[i], errno);
+            return false;
+        }
+    }
+    return true;
+}
+
+bool deck_cache_load_manifest(const char *deck_id, deck_manifest_t *out)
+{
+    char dir[256], path[320];
+    if (!out || !deck_dir(deck_id, dir, sizeof dir)) return false;
+    snprintf(path, sizeof path, "%s/manifest.json", dir);
+
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+
+    char *buf = malloc(DECK_MANIFEST_MAX);
+    if (!buf) { fclose(f); return false; }
+    size_t n = fread(buf, 1, DECK_MANIFEST_MAX, f);
+    bool full = feof(f);
+    fclose(f);
+
+    bool ok = full && n > 0 && deck_manifest_parse(buf, n, out);
+    free(buf);
+    if (!ok) ESP_LOGW(TAG, "cached manifest for %s unreadable; ignoring", deck_id);
+    return ok;
+}
+
+bool deck_cache_save_manifest(const char *deck_id, const char *json, size_t len)
+{
+    if (!json || !len || len > DECK_MANIFEST_MAX) return false;
+    if (!ensure_deck_dir(deck_id)) return false;
+
+    char dir[256], path[320], tmp[320];
+    if (!deck_dir(deck_id, dir, sizeof dir)) return false;
+    snprintf(tmp, sizeof tmp, "%s/manifest.tmp", dir);
+    snprintf(path, sizeof path, "%s/manifest.json", dir);
+
+    FILE *f = fopen(tmp, "wb");
+    if (!f) return false;
+    bool ok = fwrite(json, 1, len, f) == len;
+    ok = (fclose(f) == 0) && ok;
+    if (ok) {
+        unlink(path);            /* FATFS rename does not overwrite */
+        ok = rename(tmp, path) == 0;
+    }
+    if (!ok) { unlink(tmp); ESP_LOGW(TAG, "manifest save failed for %s", deck_id); }
+    return ok;
+}
+
+static bool frame_path(const char *deck_id, const char *digest,
+                       char *out, size_t cap)
+{
+    if (!deck_digest_valid(digest)) return false;
+    char dir[256];
+    if (!deck_dir(deck_id, dir, sizeof dir)) return false;
+    int n = snprintf(out, cap, "%s/%s.bin", dir, digest);
+    return n > 0 && n < (int)cap;
+}
+
+bool deck_cache_read_frame(const char *deck_id, const char *digest,
+                           uint32_t expect_bytes, uint8_t **out)
+{
+    if (!out) return false;
+    *out = NULL;
+    if (expect_bytes == 0) return false;
+
+    char path[320];
+    if (!frame_path(deck_id, digest, path, sizeof path)) return false;
+
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return false;
+
+    struct stat st;
+    if (fstat(fd, &st) != 0) {
+        close(fd);
+        return false;
+    }
+    uint64_t max_blob = (uint64_t)expect_bytes + FRAME_CODEC_HEADER_BYTES;
+    if (st.st_size <= 0 || (uint64_t)st.st_size > max_blob) {
+        close(fd);
+        ESP_LOGW(TAG, "cached frame %s invalid file size %lld; deleting",
+                 digest, (long long)st.st_size);
+        unlink(path);
+        return false;
+    }
+
+    size_t disk_len = (size_t)st.st_size;
+    uint8_t *blob = fb_alloc(disk_len + 1u);
+    if (!blob) { close(fd); return false; }
+
+    size_t n = 0;
+    bool read_ok = bounce_read_fd(fd, blob, disk_len + 1u, &n);
+    close(fd);
+
+    if (!read_ok) {
+        ESP_LOGW(TAG, "cached frame %s read failed; keeping it for retry", digest);
+        free(blob);
+        return false;
+    }
+    if (n != disk_len) {
+        free(blob);
+        unlink(path);
+        return false;
+    }
+
+    /* Fast zero-copy path for legacy unframed raw files on existing SD cards */
+    uint8_t *buf = NULL;
+    if (n == expect_bytes) {
+        buf = blob;
+        blob = NULL;
+    } else {
+        buf = fb_alloc(expect_bytes);
+        if (!buf) { free(blob); return false; }
+#ifdef ESP_PLATFORM
+        int64_t t_dec0 = esp_timer_get_time();
+#endif
+        bool dec_ok = frame_codec_decode(blob, n, expect_bytes, buf);
+#ifdef ESP_PLATFORM
+        int64_t dec_us = esp_timer_get_time() - t_dec0;
+#endif
+        free(blob);
+        if (!dec_ok) {
+            ESP_LOGW(TAG, "cached frame %s failed decompress; deleting", digest);
+            free(buf);
+            unlink(path);
+            return false;
+        }
+#ifdef ESP_PLATFORM
+        ESP_LOGI(TAG, "decoded frame %s (%u -> %u bytes in %lld.%02lld ms)",
+                 digest, (unsigned)n, (unsigned)expect_bytes,
+                 (long long)(dec_us / 1000), (long long)((dec_us % 1000) / 10));
+#endif
+    }
+
+    if (!deck_digest_check(buf, expect_bytes, expect_bytes, digest)) {
+        ESP_LOGW(TAG, "cached frame %s fails verification; deleting", digest);
+        free(buf);
+        unlink(path);
+        return false;
+    }
+    *out = buf;
+    return true;
 }
 
 bool deck_cache_write_frame(const char *deck_id, const char *digest,
@@ -229,19 +295,30 @@ bool deck_cache_write_frame(const char *deck_id, const char *digest,
     }
     if (!ensure_deck_dir(deck_id)) return false;
 
-    char path[176], tmp[176];
-    if (!frame_path(deck_id, digest, path, sizeof path)) return false;
-    char dir[128];
-    deck_dir(deck_id, dir, sizeof dir);
+    uint8_t *blob = NULL;
+    size_t blob_len = 0;
+    if (!frame_codec_encode(data, len, &blob, &blob_len)) {
+        ESP_LOGW(TAG, "frame encode failed for %s", digest);
+        return false;
+    }
+
+    char path[320], tmp[320], dir[256];
+    if (!frame_path(deck_id, digest, path, sizeof path) ||
+        !deck_dir(deck_id, dir, sizeof dir)) {
+        free(blob);
+        return false;
+    }
     snprintf(tmp, sizeof tmp, "%s/frame.tmp", dir);
 
     int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) {
         ESP_LOGW(TAG, "frame write: open %s failed (errno %d)", tmp, errno);
+        free(blob);
         return false;
     }
     const char *step = "write";
-    bool ok = bounce_write_fd(fd, data, len);
+    bool ok = bounce_write_fd(fd, blob, blob_len);
+    free(blob);
     int werr = errno;
     if (ok) { step = "close"; ok = (close(fd) == 0); werr = errno; }
     else close(fd);
@@ -262,8 +339,8 @@ bool deck_cache_write_frame(const char *deck_id, const char *digest,
 int deck_cache_list(const char *deck_id,
                     char digests[][DECK_DIGEST_HEX + 1], int max)
 {
-    char dir[128];
-    if (!deck_dir(deck_id, dir, sizeof dir)) return 0;
+    char dir[256];
+    if (!digests || max <= 0 || !deck_dir(deck_id, dir, sizeof dir)) return 0;
 
     DIR *d = opendir(dir);
     if (!d) return 0;
@@ -277,7 +354,6 @@ int deck_cache_list(const char *deck_id,
         char digest[DECK_DIGEST_HEX + 1];
         memcpy(digest, e->d_name, DECK_DIGEST_HEX);
         digest[DECK_DIGEST_HEX] = '\0';
-        /* FATFS may report uppercase 8.3 names; normalise before validating. */
         for (int i = 0; i < DECK_DIGEST_HEX; i++)
             if (digest[i] >= 'A' && digest[i] <= 'F') digest[i] += 'a' - 'A';
         if (!deck_digest_valid(digest)) continue;
@@ -289,19 +365,17 @@ int deck_cache_list(const char *deck_id,
 
 void deck_cache_delete(const char *deck_id, const char *digest)
 {
-    char path[176];
+    char path[320];
     if (frame_path(deck_id, digest, path, sizeof path)) unlink(path);
 }
 
 int32_t deck_cache_frame_age_s(const char *deck_id, const char *digest)
 {
-    char path[176];
+    char path[320];
     if (!frame_path(deck_id, digest, path, sizeof path)) return INT32_MAX;
     struct stat st;
     if (stat(path, &st) != 0) return INT32_MAX;
     time_t now = time(NULL);
-    /* Both stamps must be plausible wall-clock (the RTC keeps time across
-     * deep sleep; a fresh RESET before any network wake has no clock). */
     if (now < 1600000000 || st.st_mtime < 1600000000 || now < st.st_mtime)
         return INT32_MAX;
     return (int32_t)(now - st.st_mtime);

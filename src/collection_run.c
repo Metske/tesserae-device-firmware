@@ -18,7 +18,7 @@
 #include "image_fetcher.h"
 #include "net_rest.h"
 #include "rest_config.h"
-#include "sdcard.h"
+#include "cache_storage.h"
 
 static const char *TAG = "collection";
 
@@ -90,7 +90,7 @@ static void report(const char *state)
     if (s_have_collection && s_manifest) {
         cached = s_manifest->n_frames;
         total = (uint32_t)s_manifest->total_frames;
-    } else if (sdcard_mounted()) {
+    } else if (cache_storage_mounted()) {
         char have[FC_MAX_FRAMES][FC_DIGEST_HEX + 1];
         cached = collection_cache_list(c->collection_id, have, FC_MAX_FRAMES);
     }
@@ -117,8 +117,8 @@ static void fail_clear(void)
 
 void collection_boot(void)
 {
-    if (!sdcard_mounted() && !sdcard_mount()) return;
-    rest_set_frame_cache_capability(sdcard_free_bytes(), FC_MAX_FRAMES);
+    if (!cache_storage_mounted() && !cache_storage_mount()) return;
+    rest_set_frame_cache_capability(cache_storage_effective_capacity_bytes(EPD_BUF_BYTES), FC_MAX_FRAMES);
     if (s_schedule_magic != SCHEDULE_MAGIC) schedule_reset();
 
     const rest_config_t *c = rest_config_get();
@@ -251,7 +251,7 @@ static void clear_assignment(void)
 bool collection_sync_pending(bool present, const char *id, const char *kind,
                              const char *version)
 {
-    if (!sdcard_mounted()) return false;
+    if (!cache_storage_mounted()) return false;
     if (!present) { clear_assignment(); return false; }
     if (!id || !id[0] || !version || !version[0] ||
         !kind || strcmp(kind, "album") != 0) {

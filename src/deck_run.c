@@ -17,7 +17,7 @@
 #include "epd_driver.h"
 #include "image_fetcher.h"
 #include "rest_config.h"
-#include "sdcard.h"
+#include "cache_storage.h"
 
 static const char *TAG = "deck";
 
@@ -47,8 +47,8 @@ static void nav_persist(const char *deck_id, const char *page_id, bool sd_painte
 
 void deck_boot(void)
 {
-    if (!sdcard_mount()) return;
-    rest_set_deck_capability(sdcard_free_bytes());
+    if (!cache_storage_mount()) return;
+    rest_set_deck_capability(cache_storage_effective_capacity_bytes(EPD_BUF_BYTES));
 
     const rest_config_t *c = rest_config_get();
 
@@ -223,7 +223,7 @@ void deck_network_painted(void)
 
 bool deck_sync_pending(bool deck_present, const char *version)
 {
-    if (!sdcard_mounted() || !deck_present) return false;
+    if (!cache_storage_mounted() || !deck_present) return false;
     /* Version match with a loaded deck means fully synced; anything else
      * (no deck yet, version drift, unreadable manifest) wants the tail. */
     const rest_config_t *c = rest_config_get();
@@ -333,5 +333,5 @@ void deck_sync_tail(bool deck_present, const char *version)
 
 void deck_pre_sleep(void)
 {
-    sdcard_prepare_sleep();
+    cache_storage_prepare_sleep();
 }
