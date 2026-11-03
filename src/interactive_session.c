@@ -215,6 +215,20 @@ isess_input_result_t isess_on_touch(interactive_session_t *s,
     return ISESS_INPUT_UNHANDLED;
 }
 
+bool isess_select_item(interactive_session_t *s, const char *item_id,
+                       int collection_index, int64_t now_ms)
+{
+    if (!s || s->source == ISESS_SOURCE_NONE) return false;
+    s->last_input_ms = now_ms;
+    if (s->source == ISESS_SOURCE_DECK && item_id && item_id[0]) {
+        return select_deck_target(s, item_id, ISESS_DIR_OTHER);
+    }
+    if (s->source == ISESS_SOURCE_COLLECTION && collection_index >= 0) {
+        return select_collection_target(s, collection_index, ISESS_DIR_OTHER);
+    }
+    return false;
+}
+
 static void union_dirty_rect(interactive_session_t *s, int x, int y, int w, int h)
 {
     if (x < 0) { w += x; x = 0; }

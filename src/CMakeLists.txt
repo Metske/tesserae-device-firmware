@@ -94,6 +94,10 @@ idf_component_register(
         "collection_run.c"
         "interactive_session.c"
         "session_run.c"
+        "freeink_compositor.cpp"
+        "overlay_modal.cpp"
+        "vendor/freeink/FreeInkUI/src/FreeInkUI.cpp"
+        "vendor/freeink/FreeInkFont/src/TtfFont.cpp"
         "sdcard.c"
         "sdcard_lenient.c"
         "splash.c"
@@ -101,6 +105,10 @@ idf_component_register(
     INCLUDE_DIRS
         "."
         "panel"
+        "vendor/freeink"
+        "vendor/freeink/FreeInkUI/include"
+        "vendor/freeink/FreeInkFont/include"
+        "vendor/freeink/FreeInkFont/third_party/stb"
         "../boards"
         "../include"
     EMBED_FILES

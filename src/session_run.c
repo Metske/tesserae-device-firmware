@@ -1,5 +1,6 @@
 /*
- * session_run.c -- Dual-Task FreeRTOS Interactive Session orchestrator.
+ * session_run.c -- Dual-Task FreeRTOS Interactive Session orchestrator +
+ * FreeInkUI 4-bpp Overlay Modal system drawer (Tickets #3 / T2 & #4 / T3).
  */
 #include "session_run.h"
 
@@ -14,7 +15,9 @@
 #include "freertos/task.h"
 
 #include "app_config.h"
+#include "battery.h"
 #include "buzzer.h"
+#include "cache_storage.h"
 #include "collection_cache.h"
 #include "collection_run.h"
 #include "deck_cache.h"
@@ -23,7 +26,9 @@
 #include "frame_codec.h"
 #include "interactive_session.h"
 #include "net_rest.h"
+#include "overlay_modal.h"
 #include "rest_config.h"
+#include "sht4x.h"
 
 static const char *TAG = "isess";
 
@@ -56,6 +61,18 @@ typedef struct {
 
     /* Shadow framebuffer only used on non-slot panels */
     uint8_t              *shadow_fb;
+
+    /* Dual 4-bpp framebuffers + FreeInkUI Overlay Modal state (ADR-0003) */
+    uint8_t              *base_fb;
+    char                  base_fb_digest[ISESS_DIGEST_CAP];
+    uint8_t              *work_fb;
+    overlay_modal_t       modal;
+    omodal_telemetry_t    cached_telemetry;
+    bool                  open_modal_on_entry;
+    bool                  overlay_repaint_pending;
+    bool                  overlay_repaint_gc16;
+    fi_dirty_rect_t       overlay_dirty;
+    bool                  live_wifi_enabled;
 } session_runtime_t;
 
 static int64_t now_ms(void)
@@ -170,6 +187,7 @@ static bool worker_should_abort_preload(void *ctx)
     bool abort_now = false;
     xSemaphoreTake(rt->mux, portMAX_DELAY);
     if (rt->force_stop ||
+        rt->overlay_repaint_pending ||
         strcmp(rt->sess.target_id, rt->sess.displayed_id) != 0) {
         abort_now = true;
     }
@@ -192,7 +210,18 @@ static bool obtain_raw_frame_unlocked(session_runtime_t *rt,
         return true;
     }
 
-    /* 2. PSRAM Neighbor Prefetch blob (copy ~20 KB under lock, decode unlocked) */
+    /* 2. Already held in base_fb */
+    if (rt->base_fb && strcmp(rt->base_fb_digest, digest) == 0 &&
+        expect_bytes == (uint32_t)EPD_BUF_BYTES) {
+        uint8_t *copy = alloc_frame_buf(expect_bytes);
+        if (copy) {
+            memcpy(copy, rt->base_fb, expect_bytes);
+            *out_raw = copy;
+            return true;
+        }
+    }
+
+    /* 3. PSRAM Neighbor Prefetch blob (copy ~20 KB under lock, decode unlocked) */
     uint8_t *blob = NULL;
     size_t blob_len = 0;
     xSemaphoreTake(rt->mux, portMAX_DELAY);
@@ -214,7 +243,7 @@ static bool obtain_raw_frame_unlocked(session_runtime_t *rt,
         free(blob);
     }
 
-    /* 3. Flash / SD cache read + populate PSRAM Neighbor Prefetch */
+    /* 4. Flash / SD cache read + populate PSRAM Neighbor Prefetch */
     uint8_t *disk_raw = NULL;
     uint8_t *disk_blob = NULL;
     size_t disk_blob_len = 0;
@@ -231,6 +260,76 @@ static bool obtain_raw_frame_unlocked(session_runtime_t *rt,
     free(disk_blob);
     *out_raw = disk_raw;
     return true;
+}
+
+static bool ensure_dual_fbs_locked(session_runtime_t *rt)
+{
+    const size_t fb_bytes = (size_t)EPD_BUF_BYTES;
+    if (!rt->base_fb) {
+        rt->base_fb = alloc_frame_buf(fb_bytes);
+        if (!rt->base_fb) return false;
+        memset(rt->base_fb, 0xFF, fb_bytes);
+    }
+    if (!rt->work_fb) {
+        rt->work_fb = alloc_frame_buf(fb_bytes);
+        if (!rt->work_fb) return false;
+        memcpy(rt->work_fb, rt->base_fb, fb_bytes);
+    }
+    return true;
+}
+
+static void sample_session_telemetry_unlocked(session_runtime_t *rt)
+{
+    omodal_telemetry_t *tel = &rt->cached_telemetry;
+    memset(tel, 0, sizeof(*tel));
+    tel->battery_pct = battery_present() ? battery_read_pct() : -1;
+    tel->battery_charging = false;
+
+    sht4x_sample_t env = {0};
+    if (sht4x_read(&env) == ESP_OK) {
+        tel->has_sht4x = true;
+        tel->temperature_c = env.temperature_c;
+        tel->humidity_pct = env.humidity_pct;
+    }
+
+    uint64_t free_b = cache_storage_free_bytes();
+    uint32_t total_b = 6u * 1024u * 1024u;
+    if (free_b > total_b) total_b = (uint32_t)free_b;
+    tel->cache_total_bytes = total_b;
+    tel->cache_used_bytes = (free_b <= total_b) ? (total_b - (uint32_t)free_b) : 0;
+
+    if (rt->sess.source == ISESS_SOURCE_DECK && rt->sess.deck) {
+        tel->cached_item_count = rt->sess.deck->n_pages;
+    } else if (rt->sess.source == ISESS_SOURCE_COLLECTION && rt->sess.collection) {
+        tel->cached_item_count = rt->sess.collection->n_frames;
+    }
+    tel->live_wifi_enabled = rt->live_wifi_enabled;
+}
+
+static void populate_modal_telemetry_locked(session_runtime_t *rt)
+{
+    rt->cached_telemetry.live_wifi_enabled = rt->live_wifi_enabled;
+    omodal_set_context(&rt->modal, rt->sess.deck, rt->sess.collection,
+                       rt->sess.target_id, rt->sess.target_index,
+                       &rt->cached_telemetry);
+}
+
+static void queue_overlay_dirty_locked(session_runtime_t *rt,
+                                       const fi_dirty_rect_t *r,
+                                       bool full_gc16)
+{
+    if (!r || !r->valid) return;
+    if (!rt->overlay_repaint_pending || !rt->overlay_dirty.valid) {
+        rt->overlay_dirty = *r;
+    } else {
+        fi_union_dirty_rect(&rt->overlay_dirty, r->x, r->y, r->w, r->h,
+                            rt->sess.panel_w, rt->sess.panel_h);
+    }
+    rt->overlay_repaint_pending = true;
+    if (full_gc16) {
+        rt->overlay_repaint_gc16 = true;
+    }
+    isess_mark_dirty_rect(&rt->sess, r->x, r->y, r->w, r->h, now_ms());
 }
 
 static bool ensure_panel_up(session_runtime_t *rt)
@@ -265,6 +364,7 @@ static void maybe_stage_idle_sdram_neighbors(session_runtime_t *rt)
 
     xSemaphoreTake(rt->mux, portMAX_DELAY);
     if (!rt->force_stop && !rt->sess.worker_busy &&
+        !rt->overlay_repaint_pending && !rt->modal.is_open &&
         strcmp(rt->sess.target_id, rt->sess.displayed_id) == 0 &&
         rt->sess.displayed_id[0]) {
         snprintf(disp_id, sizeof(disp_id), "%s", rt->sess.displayed_id);
@@ -313,7 +413,7 @@ static void display_worker_task(void *arg)
     session_runtime_t *rt = (session_runtime_t *)arg;
 
     /* Hold the display controller in warm standby immediately on session entry,
-     * and if we entered via a non-navigating touch wake (target == displayed),
+     * and if we entered via a non-navigating touch/button wake (target == displayed),
      * stage the current Base Frame into SDRAM slot 0 without flashing glass. */
     if (!rt->force_stop && ensure_panel_up(rt)) {
         bool same_page = false;
@@ -322,7 +422,7 @@ static void display_worker_task(void *arg)
         xSemaphoreGive(rt->mux);
 
         if (same_page && rt->seed_raw) {
-            if (rt->n_hw_slots > 0) {
+            if (rt->n_hw_slots > 0 && !rt->open_modal_on_entry) {
                 if (epd_preload_slot(0, rt->seed_raw,
                                      worker_should_abort_preload, rt)) {
                     snprintf(rt->hw_slots[0].digest, ISESS_DIGEST_CAP, "%s",
@@ -334,6 +434,7 @@ static void display_worker_task(void *arg)
                 rt->seed_raw = NULL;
                 rt->seed_digest[0] = '\0';
             } else {
+                free(rt->shadow_fb);
                 rt->shadow_fb = rt->seed_raw;
                 rt->seed_raw = NULL;
                 rt->seed_digest[0] = '\0';
@@ -345,9 +446,19 @@ static void display_worker_task(void *arg)
         isess_work_t work;
         bool have_work = false;
         bool stop_now = false;
+        bool do_overlay_repaint = false;
+        bool overlay_gc16 = false;
+        fi_dirty_rect_t ov_rect = {0, 0, 0, 0, false};
 
         xSemaphoreTake(rt->mux, portMAX_DELAY);
-        if (rt->force_stop) {
+        if (rt->overlay_repaint_pending && !rt->force_stop) {
+            do_overlay_repaint = true;
+            overlay_gc16 = rt->overlay_repaint_gc16;
+            ov_rect = rt->overlay_dirty;
+            rt->overlay_repaint_pending = false;
+            rt->overlay_repaint_gc16 = false;
+            rt->overlay_dirty.valid = false;
+        } else if (rt->force_stop) {
             /* Before stopping on fallthrough, settle dirty pixels if panel is up */
             if (rt->panel_up && rt->sess.needs_settle && !rt->sess.worker_busy) {
                 memset(&work, 0, sizeof(work));
@@ -374,6 +485,59 @@ static void display_worker_task(void *arg)
 
         if (stop_now) break;
 
+        if (do_overlay_repaint) {
+            int64_t t0 = now_ms();
+            if (ensure_panel_up(rt) && rt->work_fb && ov_rect.valid) {
+                /* Sub-region or full-panel upload into IT8951 slot 0 causes
+                 * slot 0 to hold `work_fb`; invalidate its digest tag if the
+                 * modal is open so a later base-frame lookup reloads cleanly. */
+                if (rt->n_hw_slots > 0) {
+                    rt->hw_slots[0].digest[0] = '\0';
+                }
+                if (overlay_gc16) {
+                    if (rt->n_hw_slots > 0) {
+                        if (epd_preload_slot(0, rt->work_fb, NULL, NULL)) {
+                            (void)epd_display_slot_mode(0, 0, 0,
+                                                        rt->sess.panel_w,
+                                                        rt->sess.panel_h,
+                                                        EPD_RF_GC16);
+                        }
+                    } else {
+                        epd_display_partial_mode(rt->work_fb, 0, 0,
+                                                 rt->sess.panel_w,
+                                                 rt->sess.panel_h,
+                                                 EPD_RF_GC16);
+                    }
+                    xSemaphoreTake(rt->mux, portMAX_DELAY);
+                    rt->sess.needs_settle = false;
+                    rt->sess.dirty_x = rt->sess.dirty_y = 0;
+                    rt->sess.dirty_w = rt->sess.dirty_h = 0;
+                    xSemaphoreGive(rt->mux);
+                    ESP_LOGI(TAG, "overlay clean refresh (GC16 full panel) in %lld ms",
+                             (long long)(now_ms() - t0));
+                } else {
+                    if (rt->n_hw_slots > 0) {
+                        if (epd_preload_slot(0, rt->work_fb, NULL, NULL)) {
+                            (void)epd_display_slot_mode(0,
+                                                        ov_rect.x, ov_rect.y,
+                                                        ov_rect.w, ov_rect.h,
+                                                        EPD_RF_GRAY);
+                        }
+                    } else {
+                        epd_display_partial_mode(rt->work_fb,
+                                                 ov_rect.x, ov_rect.y,
+                                                 ov_rect.w, ov_rect.h,
+                                                 EPD_RF_GRAY);
+                    }
+                    ESP_LOGI(TAG, "overlay modal %s (%d,%d %dx%d) in %lld ms",
+                             rt->modal.is_open ? "opened" : "restored",
+                             ov_rect.x, ov_rect.y, ov_rect.w, ov_rect.h,
+                             (long long)(now_ms() - t0));
+                }
+            }
+            continue;
+        }
+
         if (!have_work) {
             maybe_stage_idle_sdram_neighbors(rt);
             xSemaphoreTake(rt->work_sem, pdMS_TO_TICKS(40));
@@ -396,21 +560,38 @@ static void display_worker_task(void *arg)
             if (ok && rt->n_hw_slots > 0) {
                 int slot = find_hw_slot(rt, work.digest);
                 bool was_preloaded = (slot >= 0);
+                uint8_t *raw = NULL;
                 if (slot < 0) {
-                    uint8_t *raw = NULL;
                     ok = obtain_raw_frame_unlocked(rt, work.digest,
                                                    work.expect_bytes, &raw);
-                    if (ok) {
+                    if (ok && raw) {
                         char empty_nbrs[2][ISESS_DIGEST_CAP] = {{0}, {0}};
                         slot = pick_hw_slot(rt, empty_nbrs, 0);
                         rt->hw_slots[slot].digest[0] = '\0';
                         ok = epd_preload_slot(slot, raw, NULL, NULL);
-                        free(raw);
                         if (ok) {
                             snprintf(rt->hw_slots[slot].digest, ISESS_DIGEST_CAP,
                                      "%s", work.digest);
                         }
                     }
+                } else {
+                    /* Ensure base_fb is updated to the newly displayed page */
+                    (void)obtain_raw_frame_unlocked(rt, work.digest,
+                                                    work.expect_bytes, &raw);
+                }
+                if (raw) {
+                    xSemaphoreTake(rt->mux, portMAX_DELAY);
+                    if (ensure_dual_fbs_locked(rt) &&
+                        work.expect_bytes == (uint32_t)EPD_BUF_BYTES) {
+                        memcpy(rt->base_fb, raw, work.expect_bytes);
+                        snprintf(rt->base_fb_digest, sizeof(rt->base_fb_digest),
+                                 "%s", work.digest);
+                        if (!rt->modal.is_open) {
+                            memcpy(rt->work_fb, raw, work.expect_bytes);
+                        }
+                    }
+                    xSemaphoreGive(rt->mux);
+                    free(raw);
                 }
                 if (ok && slot >= 0) {
                     rt->hw_slots[slot].seq = ++rt->hw_slot_seq;
@@ -426,7 +607,18 @@ static void display_worker_task(void *arg)
                 uint8_t *raw = NULL;
                 ok = obtain_raw_frame_unlocked(rt, work.digest,
                                                work.expect_bytes, &raw);
-                if (ok) {
+                if (ok && raw) {
+                    xSemaphoreTake(rt->mux, portMAX_DELAY);
+                    if (ensure_dual_fbs_locked(rt) &&
+                        work.expect_bytes == (uint32_t)EPD_BUF_BYTES) {
+                        memcpy(rt->base_fb, raw, work.expect_bytes);
+                        snprintf(rt->base_fb_digest, sizeof(rt->base_fb_digest),
+                                 "%s", work.digest);
+                        if (!rt->modal.is_open) {
+                            memcpy(rt->work_fb, raw, work.expect_bytes);
+                        }
+                    }
+                    xSemaphoreGive(rt->mux);
                     if (epd_supports_partial()) {
                         epd_display_partial_mode(raw, work.rx, work.ry,
                                                  work.rw, work.rh, EPD_RF_GRAY);
@@ -453,18 +645,27 @@ static void display_worker_task(void *arg)
         if (work.kind == ISESS_WORK_SETTLE_PASS) {
             int64_t t0 = now_ms();
             bool ok = false;
-            if (rt->panel_up && rt->n_hw_slots > 0) {
+            if (rt->panel_up && rt->modal.is_open && rt->work_fb) {
+                epd_display_partial_mode(rt->work_fb, work.rx, work.ry,
+                                         work.rw, work.rh, EPD_RF_GC16);
+                ok = true;
+            } else if (rt->panel_up && rt->n_hw_slots > 0) {
                 int slot = find_hw_slot(rt, work.digest);
                 if (slot >= 0) {
                     ok = epd_display_slot_mode(slot, work.rx, work.ry,
                                                work.rw, work.rh, EPD_RF_GC16);
+                } else if (rt->work_fb) {
+                    epd_display_partial_mode(rt->work_fb, work.rx, work.ry,
+                                             work.rw, work.rh, EPD_RF_GC16);
+                    ok = true;
                 }
-            } else if (rt->panel_up && rt->shadow_fb) {
+            } else if (rt->panel_up && (rt->work_fb || rt->shadow_fb)) {
+                const uint8_t *fb = rt->work_fb ? rt->work_fb : rt->shadow_fb;
                 if (epd_supports_partial()) {
-                    epd_display_partial_mode(rt->shadow_fb, work.rx, work.ry,
+                    epd_display_partial_mode(fb, work.rx, work.ry,
                                              work.rw, work.rh, EPD_RF_GC16);
                 } else {
-                    epd_display_frame(rt->shadow_fb, work.expect_bytes);
+                    epd_display_frame(fb, work.expect_bytes);
                 }
                 ok = true;
             }
@@ -495,6 +696,7 @@ static void display_worker_task(void *arg)
             free(blob);
 
             if (ok && raw && rt->panel_up && rt->n_hw_slots >= 2 &&
+                !rt->modal.is_open &&
                 (work.nav_dir == ISESS_DIR_NEXT || work.nav_dir == ISESS_DIR_PREV) &&
                 find_hw_slot(rt, work.digest) < 0 &&
                 !worker_should_abort_preload(rt)) {
@@ -559,6 +761,50 @@ static void configure_session_timeouts(interactive_session_t *s)
                        ISESS_DEFAULT_MAX_SESSION_MS);
 }
 
+static void handle_modal_action_locked(session_runtime_t *rt,
+                                       omodal_action_t act,
+                                       const fi_dirty_rect_t *dirty,
+                                       uint64_t *event_seq,
+                                       bool *fallthrough)
+{
+    if (act == OMODAL_ACT_OPENED || act == OMODAL_ACT_CLOSE ||
+        act == OMODAL_ACT_TOGGLE_LIVE_WIFI) {
+        if (act == OMODAL_ACT_TOGGLE_LIVE_WIFI) {
+            rt->live_wifi_enabled = rt->modal.telemetry.live_wifi_enabled;
+        }
+        queue_overlay_dirty_locked(rt, dirty, false);
+        xSemaphoreGive(rt->work_sem);
+        return;
+    }
+
+    if (act == OMODAL_ACT_CLEAN_REFRESH) {
+        queue_overlay_dirty_locked(rt, dirty, true);
+        xSemaphoreGive(rt->work_sem);
+        return;
+    }
+
+    if (act == OMODAL_ACT_SELECT_ITEM) {
+        queue_overlay_dirty_locked(rt, dirty, false);
+        (void)isess_select_item(&rt->sess, rt->modal.selected_id,
+                                rt->modal.selected_index, now_ms());
+        ESP_LOGI(TAG, "overlay modal selected '%s' (index %d)",
+                 rt->sess.target_id, rt->sess.target_index);
+        xSemaphoreGive(rt->work_sem);
+        return;
+    }
+
+    if (act == OMODAL_ACT_SYNC_NOW) {
+        queue_overlay_dirty_locked(rt, dirty, false);
+        uint64_t ev = event_seq ? ++(*event_seq) : 1;
+        rest_set_button("refresh", ev);
+        rt->force_stop = true;
+        *fallthrough = true;
+        ESP_LOGI(TAG, "overlay modal requested Ad-Hoc Sync Now");
+        xSemaphoreGive(rt->work_sem);
+        return;
+    }
+}
+
 static void run_session_loop(session_runtime_t *rt,
                              bool woke_by_button,
                              uint64_t *event_seq,
@@ -587,9 +833,25 @@ static void run_session_loop(session_runtime_t *rt,
     int  st_misses = 0;
 #endif
 
-    ESP_LOGI(TAG, "entering session (%s, displayed='%s' -> target='%s', idle=%ld ms, settle=%ld ms)",
+    /* If session entry requested opening the Overlay Modal (e.g. short-press
+     * middle button wake or top-edge swipe down wake), render it onto work_fb
+     * immediately so the worker paints it on its very first cycle. */
+    if (rt->open_modal_on_entry) {
+        xSemaphoreTake(rt->mux, portMAX_DELAY);
+        if (ensure_dual_fbs_locked(rt)) {
+            populate_modal_telemetry_locked(rt);
+            fi_dirty_rect_t dirty = {0, 0, 0, 0, false};
+            if (omodal_open(&rt->modal, rt->work_fb, rt->base_fb, &dirty)) {
+                queue_overlay_dirty_locked(rt, &dirty, false);
+            }
+        }
+        xSemaphoreGive(rt->mux);
+    }
+
+    ESP_LOGI(TAG, "entering session (%s, displayed='%s' -> target='%s', modal=%d, idle=%ld ms, settle=%ld ms)",
              rt->sess.source == ISESS_SOURCE_DECK ? "deck" : "collection",
              rt->sess.displayed_id, rt->sess.target_id,
+             (int)rt->modal.is_open,
              (long)rt->sess.idle_timeout_ms, (long)rt->sess.settle_idle_ms);
 
     TaskHandle_t worker = NULL;
@@ -602,23 +864,39 @@ static void run_session_loop(session_runtime_t *rt,
     for (;;) {
         bool expired = false;
         xSemaphoreTake(rt->mux, portMAX_DELAY);
-        expired = rt->sess.expired;
+        expired = rt->sess.expired || rt->force_stop;
         xSemaphoreGive(rt->mux);
         if (expired) break;
 
 #ifdef BOARD_HAS_BUTTONS
         button_id_t b = buttons_poll_pressed();
         if (b != BTN_NONE) {
-            if (buttons_is_maintenance_button(b) &&
-                buttons_maintenance_held_for_activation()) {
-                ESP_LOGI(TAG, "maintenance button held; stopping session for BLE setup");
+            if (buttons_is_maintenance_button(b)) {
+                if (buttons_maintenance_held_for_activation()) {
+                    ESP_LOGI(TAG, "maintenance button held >= %ds; stopping session for BLE setup",
+                             BLE_MAINTENANCE_HOLD_S);
+                    xSemaphoreTake(rt->mux, portMAX_DELAY);
+                    rt->force_stop = true;
+                    rt->sess.needs_settle = false;
+                    xSemaphoreGive(rt->mux);
+                    xSemaphoreGive(rt->work_sem);
+                    *maintenance_requested = true;
+                    break;
+                }
+                /* Short press (< 4 s) on middle button (GPIO3) toggles the
+                 * FreeInkUI Overlay Modal system drawer! */
+                buzzer_feedback();
                 xSemaphoreTake(rt->mux, portMAX_DELAY);
-                rt->force_stop = true;
-                rt->sess.needs_settle = false;
+                if (ensure_dual_fbs_locked(rt)) {
+                    populate_modal_telemetry_locked(rt);
+                    fi_dirty_rect_t dirty = {0, 0, 0, 0, false};
+                    omodal_action_t act = omodal_on_middle_button(
+                        &rt->modal, 200, rt->work_fb, rt->base_fb, &dirty);
+                    handle_modal_action_locked(rt, act, &dirty, event_seq,
+                                               fallthrough);
+                }
                 xSemaphoreGive(rt->mux);
-                xSemaphoreGive(rt->work_sem);
-                *maintenance_requested = true;
-                break;
+                continue;
             }
 
             const char *bname = button_name(b);
@@ -626,6 +904,12 @@ static void run_session_loop(session_runtime_t *rt,
             buzzer_feedback();
 
             xSemaphoreTake(rt->mux, portMAX_DELAY);
+            if (rt->modal.is_open && ensure_dual_fbs_locked(rt)) {
+                fi_dirty_rect_t dirty = {0, 0, 0, 0, false};
+                if (omodal_close(&rt->modal, rt->work_fb, rt->base_fb, &dirty)) {
+                    queue_overlay_dirty_locked(rt, &dirty, false);
+                }
+            }
             isess_input_result_t res = isess_on_button(&rt->sess, bname, now_ms());
             xSemaphoreGive(rt->mux);
 
@@ -683,16 +967,37 @@ static void run_session_loop(session_runtime_t *rt,
                     buzzer_feedback();
 
                     xSemaphoreTake(rt->mux, portMAX_DELAY);
-                    isess_input_result_t res = isess_on_touch(
-                        &rt->sess, st_x0, st_y0, st_x1, st_y1, dur, t_cur);
-                    xSemaphoreGive(rt->mux);
-
-                    ESP_LOGI(TAG, "touch (%d,%d)->(%d,%d) %ums -> %s",
-                             st_x0, st_y0, st_x1, st_y1, (unsigned)dur,
-                             res == ISESS_INPUT_HANDLED_LOCAL ? rt->sess.target_id : "unhandled");
-                    if (res == ISESS_INPUT_HANDLED_LOCAL) {
-                        xSemaphoreGive(rt->work_sem);
+                    bool modal_handled = false;
+                    if (ensure_dual_fbs_locked(rt) &&
+                        (rt->modal.is_open ||
+                         omodal_is_top_swipe_down(st_x0, st_y0, st_x1, st_y1,
+                                                  rt->sess.panel_w,
+                                                  rt->sess.panel_h))) {
+                        populate_modal_telemetry_locked(rt);
+                        fi_dirty_rect_t dirty = {0, 0, 0, 0, false};
+                        omodal_action_t act = omodal_on_touch(
+                            &rt->modal, st_x0, st_y0, st_x1, st_y1,
+                            rt->work_fb, rt->base_fb, &dirty);
+                        if (act != OMODAL_ACT_NONE) {
+                            modal_handled = true;
+                            handle_modal_action_locked(rt, act, &dirty,
+                                                       event_seq, fallthrough);
+                        }
                     }
+
+                    if (!modal_handled) {
+                        isess_input_result_t res = isess_on_touch(
+                            &rt->sess, st_x0, st_y0, st_x1, st_y1, dur, t_cur);
+                        ESP_LOGI(TAG, "touch (%d,%d)->(%d,%d) %ums -> %s",
+                                 st_x0, st_y0, st_x1, st_y1, (unsigned)dur,
+                                 res == ISESS_INPUT_HANDLED_LOCAL
+                                     ? rt->sess.target_id
+                                     : "unhandled");
+                        if (res == ISESS_INPUT_HANDLED_LOCAL) {
+                            xSemaphoreGive(rt->work_sem);
+                        }
+                    }
+                    xSemaphoreGive(rt->mux);
                 }
             }
         }
@@ -733,6 +1038,16 @@ static bool launch_validated_session(session_runtime_t *rt,
     }
     free(blob);
 
+    omodal_init(&rt->modal, EPD_WIDTH, EPD_HEIGHT);
+    sample_session_telemetry_unlocked(rt);
+    if (ensure_dual_fbs_locked(rt) &&
+        rt->sess.target_bytes == (uint32_t)EPD_BUF_BYTES) {
+        memcpy(rt->base_fb, raw, rt->sess.target_bytes);
+        memcpy(rt->work_fb, raw, rt->sess.target_bytes);
+        snprintf(rt->base_fb_digest, sizeof(rt->base_fb_digest),
+                 "%s", rt->sess.target_digest);
+    }
+
     snprintf(rt->seed_digest, sizeof(rt->seed_digest), "%s", rt->sess.target_digest);
     rt->seed_raw = raw;
     rt->active_hw_slot = -1;
@@ -745,6 +1060,8 @@ static bool launch_validated_session(session_runtime_t *rt,
         if (rt->work_sem) vSemaphoreDelete(rt->work_sem);
         if (rt->done_sem) vSemaphoreDelete(rt->done_sem);
         free(rt->seed_raw);
+        free(rt->base_fb);
+        free(rt->work_fb);
         isess_free(&rt->sess);
         return false;
     }
@@ -757,6 +1074,8 @@ static bool launch_validated_session(session_runtime_t *rt,
     vSemaphoreDelete(rt->done_sem);
     free(rt->seed_raw);
     free(rt->shadow_fb);
+    free(rt->base_fb);
+    free(rt->work_fb);
     isess_free(&rt->sess);
     return true;
 }
@@ -780,7 +1099,12 @@ bool session_run_try_button_wake(button_id_t woke_btn, uint64_t *event_seq,
     }
     configure_session_timeouts(&rt->sess);
 
-    if (isess_on_button(&rt->sess, bname, t0) != ISESS_INPUT_HANDLED_LOCAL) {
+    if (woke_btn == BTN_REFRESH) {
+        /* Short press (< 4 s) on the middle button (GPIO3) wakes into the
+         * Interactive Session with the FreeInkUI Overlay Modal open on top of
+         * the current Base Frame (ADR-0003). */
+        rt->open_modal_on_entry = true;
+    } else if (isess_on_button(&rt->sess, bname, t0) != ISESS_INPUT_HANDLED_LOCAL) {
         isess_free(&rt->sess);
         free(rt);
         return false;
@@ -819,12 +1143,18 @@ bool session_run_try_touch_wake(const touch_stroke_t *wake_stroke,
     configure_session_timeouts(&rt->sess);
 
     if (wake_stroke && wake_stroke->valid) {
-        /* Apply horizontal swipe or Deck link-zone tap if matched; a plain tap
-         * on a cached Deck/Collection keeps target == displayed and still wakes
-         * into the unified Interactive Session with warm panel + prefetch. */
-        (void)isess_on_touch(&rt->sess, wake_stroke->x0, wake_stroke->y0,
-                             wake_stroke->x1, wake_stroke->y1,
-                             wake_stroke->ms, t0);
+        if (omodal_is_top_swipe_down(wake_stroke->x0, wake_stroke->y0,
+                                     wake_stroke->x1, wake_stroke->y1,
+                                     EPD_WIDTH, EPD_HEIGHT)) {
+            rt->open_modal_on_entry = true;
+        } else {
+            /* Apply horizontal swipe or Deck link-zone tap if matched; a plain tap
+             * on a cached Deck/Collection keeps target == displayed and still wakes
+             * into the unified Interactive Session with warm panel + prefetch. */
+            (void)isess_on_touch(&rt->sess, wake_stroke->x0, wake_stroke->y0,
+                                 wake_stroke->x1, wake_stroke->y1,
+                                 wake_stroke->ms, t0);
+        }
     }
 
     bool ok = launch_validated_session(rt, false, event_seq, fallthrough_button,

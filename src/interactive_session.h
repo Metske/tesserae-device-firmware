@@ -149,6 +149,11 @@ isess_input_result_t isess_on_touch(interactive_session_t *s,
                                     int x0, int y0, int x1, int y1,
                                     uint32_t duration_ms, int64_t now_ms);
 
+/* Select a specific Deck page or Frame Collection index directly (e.g. from
+ * the Overlay Modal page/frame switcher). */
+bool isess_select_item(interactive_session_t *s, const char *item_id,
+                       int collection_index, int64_t now_ms);
+
 /* Record a partial Fast Pass dirty region (4-px X aligned) so the idle Settle
  * Pass cleans it with GC16 after `settle_idle_ms`. */
 void isess_mark_dirty_rect(interactive_session_t *s,

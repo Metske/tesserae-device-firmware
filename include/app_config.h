@@ -88,7 +88,7 @@
 
 /* On supported Seeed displays, a Refresh hold shorter than factory reset opens
  * the bounded BLE channel. A no-credentials boot remains AP-first. */
-#define BLE_MAINTENANCE_HOLD_S 3
+#define BLE_MAINTENANCE_HOLD_S 4
 #define BLE_SETUP_TIMEOUT_S    (5 * 60)
 
 /* Low-battery goodbye: below GOODBYE mV the device paints a "battery empty"
