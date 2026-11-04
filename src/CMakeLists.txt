@@ -97,6 +97,7 @@ idf_component_register(
         "session_run.c"
         "freeink_compositor.cpp"
         "overlay_modal.cpp"
+        "widget_region.cpp"
         "vendor/freeink/FreeInkUI/src/FreeInkUI.cpp"
         "vendor/freeink/FreeInkFont/src/TtfFont.cpp"
         "sdcard.c"

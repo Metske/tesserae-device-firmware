@@ -1,6 +1,7 @@
 /* proto2_run.c -- device orchestration for protocol v2. See proto2_run.h. */
 
 #include "proto2_run.h"
+#include "widget_region.h"
 
 #if defined(BOARD_OVERLAY_PARTIAL) && defined(BOARD_HAS_TOUCH)
 
@@ -435,6 +436,7 @@ static void bundle_restore_sd(void)
     fclose(f);
     if (complete && n &&
         p2_bundle_parse(buf, n, EPD_BUF_BYTES, &s_bundle)) {
+        widget_spec_parse_datasets_json(buf, widget_region_get_current_spec());
         s_have_bundle = true;
         bundle_track_page(rest_config_get()->last_frame_etag);
     }
@@ -460,7 +462,8 @@ static void bundle_sync(void)
         return;
     }
     static p2_bundle_t nb;
-    if (!p2_bundle_parse(buf, len, EPD_BUF_BYTES, &nb)) { free(buf); return; }
+    if (!p2_bundle_parse(buf, len, EPD_BUF_BYTES, &nb)) {
+        widget_spec_parse_datasets_json(buf, widget_region_get_current_spec()); free(buf); return; }
 
     int fetched = 0, kept = 0;
     for (int i = 0; i < nb.n_states; i++) {

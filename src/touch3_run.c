@@ -30,6 +30,7 @@
 #include "rest_config.h"
 #include "cache_storage.h"
 #include "touch3.h"
+#include "widget_region.h"
 
 static const char *TAG = "touch3";
 
@@ -330,6 +331,7 @@ static bool adopt_spec(const char *json, size_t len, bool cache, bool allow_net)
 
     drop_spec();
     s_spec = parsed;
+    widget_spec_parse_json(json, EPD_WIDTH, EPD_HEIGHT, widget_region_get_current_spec());
     s_have_spec = true;
     load_atlases(allow_net);
 

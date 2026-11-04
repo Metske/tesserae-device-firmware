@@ -28,6 +28,7 @@
 #include "interactive_session.h"
 #include "net_rest.h"
 #include "overlay_modal.h"
+#include "widget_region.h"
 #include "rest_config.h"
 #include "sht4x.h"
 #include "sync_scheduler.h"
@@ -78,6 +79,23 @@ typedef struct {
     bool                  live_wifi_enabled;
     bool                  wifi_toggle_pending;
 } session_runtime_t;
+
+
+static void render_widgets_on_work_fb_locked(session_runtime_t *rt, widget_rect_t *out_dr)
+{
+    widget_spec_t *wspec = widget_region_get_current_spec();
+    if (!wspec || wspec->widget_count == 0 || !rt || !rt->work_fb || !rt->base_fb) return;
+    widget_env_state_t env;
+    memset(&env, 0, sizeof(env));
+    env.now_epoch = (int64_t)time(NULL);
+    env.tz_offset_s = rest_config_get()->tz_offset_s;
+    env.battery_pct = rt->cached_telemetry.battery_pct;
+    env.has_sht4x = rt->cached_telemetry.has_sht4x;
+    env.temperature_c = rt->cached_telemetry.temperature_c;
+    env.humidity_pct = rt->cached_telemetry.humidity_pct;
+    widget_region_render_all(wspec, &env, rt->base_fb, rt->work_fb,
+                             rt->sess.panel_w, rt->sess.panel_h, out_dr);
+}
 
 static int64_t now_ms(void)
 {
@@ -603,6 +621,8 @@ static void display_worker_task(void *arg)
                                  "%s", work.digest);
                         if (!rt->modal.is_open) {
                             memcpy(rt->work_fb, raw, work.expect_bytes);
+                            widget_rect_t dr;
+                            render_widgets_on_work_fb_locked(rt, &dr);
                         }
                     }
                     xSemaphoreGive(rt->mux);
@@ -877,7 +897,24 @@ static void run_session_loop(session_runtime_t *rt,
         return;
     }
 
+    int64_t last_widget_tick_min = 0;
     for (;;) {
+        int64_t cur_widget_min = (esp_timer_get_time() / 60000000LL);
+        if (last_widget_tick_min == 0) last_widget_tick_min = cur_widget_min;
+        if (cur_widget_min != last_widget_tick_min) {
+            last_widget_tick_min = cur_widget_min;
+            xSemaphoreTake(rt->mux, portMAX_DELAY);
+            if (!rt->modal.is_open && rt->work_fb && rt->base_fb) {
+                widget_rect_t dr;
+                render_widgets_on_work_fb_locked(rt, &dr);
+                if (dr.w > 0 && dr.h > 0) {
+                    fi_dirty_rect_t fi_dirty = {dr.x, dr.y, dr.w, dr.h, true};
+                    queue_overlay_dirty_locked(rt, &fi_dirty, false);
+                    xSemaphoreGive(rt->work_sem);
+                }
+            }
+            xSemaphoreGive(rt->mux);
+        }
         bool expired = false;
         xSemaphoreTake(rt->mux, portMAX_DELAY);
         expired = rt->sess.expired || rt->force_stop;

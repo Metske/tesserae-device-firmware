@@ -44,7 +44,8 @@
 #include "buttons.h"          /* front-button wake/report (header-only; no-op if none) */
 #include "power_latch.h"      /* battery self-latch (header-only; no-op if none) */
 #include "buzzer.h"        /* piezo feedback on an input (no-op without a buzzer) */
-#include "deck_run.h"       /* SD deck cache: local nav + sync (no-op w/o card) */
+#include "deck_run.h"
+#include "widget_region.h"       /* SD deck cache: local nav + sync (no-op w/o card) */
 #include "collection_run.h" /* offline Album: SD playback + collection sync */
 #include "overlay_run.h"    /* local overlay render mode (no-op w/o partial panel) */
 #include "wake_align.h"     /* synchronized wake: absolute targets + drift trim */
@@ -3346,7 +3347,8 @@ void app_main(void)
             sync_sched_has_cached_content(), wake_ep);
         if (wa == SYNC_ACT_PASSIVE_REFRESH_RADIO_OFF) {
             bool painted_local = collection_try_local_cycle() ||
-                                 deck_try_passive_refresh();
+                                 deck_try_passive_refresh() ||
+                                 widget_region_try_passive_refresh();
             if (painted_local) {
                 ESP_LOGI(TAG, "passive refresh wake complete (radio off); back to sleep");
                 sleep_forever_or_until_timer();
