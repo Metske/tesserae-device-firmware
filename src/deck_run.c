@@ -116,9 +116,8 @@ static bool serve_page_from_sd(const char *target)
     if (p->ttl_s > 0) {
         int32_t age = deck_cache_frame_age_s(s_manifest->deck_id, p->digest);
         if (age > p->ttl_s) {
-            ESP_LOGI(TAG, "page '%s' cached copy stale (age %ld > ttl %ld)",
+            ESP_LOGI(TAG, "page '%s' cached copy stale (age %ld > ttl %ld), serving cached for offline nav",
                      target, (long)age, (long)p->ttl_s);
-            return false;
         }
     }
 

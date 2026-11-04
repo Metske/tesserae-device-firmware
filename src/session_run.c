@@ -118,20 +118,12 @@ static bool check_item_fresh_and_sized(const interactive_session_t *s,
     if (s->source == ISESS_SOURCE_DECK && s->deck) {
         const deck_page_t *p = deck_find_page(s->deck, item_id);
         if (!p) return false;
-        if (p->ttl_s > 0 &&
-            deck_cache_frame_age_s(s->deck->deck_id, p->digest) > p->ttl_s) {
-            return false;
-        }
+        /* For interactive session navigation, accept any cached frame sized for panel */
         return true;
     }
     if (s->source == ISESS_SOURCE_COLLECTION && s->collection) {
         if (col_index < 0 || col_index >= s->collection->n_frames) return false;
-        const fc_frame_t *f = &s->collection->frames[col_index];
-        if (f->ttl_s > 0 &&
-            collection_cache_frame_age_s(s->collection->collection_id, f->digest) >
-                f->ttl_s) {
-            return false;
-        }
+        /* For interactive session navigation, accept any cached frame sized for panel */
         return true;
     }
     return false;
