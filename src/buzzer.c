@@ -148,8 +148,14 @@ void buzzer_play(const char *pattern, int volume)
 void buzzer_feedback(void)
 {
     const rest_config_t *c = rest_config_get();
+#if defined(TESSERAE_BOARD_SEEED_E1003)
+    const char *p = (c->beep_pattern && c->beep_pattern[0]) ? c->beep_pattern : "2800:12";
+    int vol = (c->beep_volume > 0) ? c->beep_volume : 75;
+    buzzer_play(p, vol);
+#else
     if (!c->beep_enabled) return;
     buzzer_play(c->beep_pattern, c->beep_volume);
+#endif
 }
 
 void buzzer_idle(void)

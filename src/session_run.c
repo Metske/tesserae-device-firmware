@@ -554,13 +554,13 @@ static void display_worker_task(void *arg)
                             (void)epd_display_slot_mode(0,
                                                         ov_rect.x, ov_rect.y,
                                                         ov_rect.w, ov_rect.h,
-                                                        EPD_RF_GRAY);
+                                                        EPD_RF_DU);
                         }
                     } else {
                         epd_display_partial_mode(rt->work_fb,
                                                  ov_rect.x, ov_rect.y,
                                                  ov_rect.w, ov_rect.h,
-                                                 EPD_RF_GRAY);
+                                                 EPD_RF_DU);
                     }
                     ESP_LOGI(TAG, "overlay modal %s (%d,%d %dx%d) in %lld ms",
                              rt->modal.is_open ? "opened" : "restored",
