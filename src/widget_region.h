@@ -28,8 +28,36 @@ typedef enum {
 typedef enum {
     WIDGET_TOUCH_NONE = 0,
     WIDGET_TOUCH_HANDLED_DIRTY,   /* Handled internally; work_fb re-rendered, out_dirty set */
+    WIDGET_TOUCH_NETWORK_BURST,   /* Network control tapped, optimistic state drawn, burst requested */
     WIDGET_TOUCH_UNCLAIMED,       /* Touch fell outside or wasn't handled by any widget */
 } widget_touch_result_t;
+
+typedef enum {
+    WIDGET_CTRL_UNKNOWN = 0,
+    WIDGET_CTRL_BUTTON,
+    WIDGET_CTRL_SWITCH,
+    WIDGET_CTRL_SLIDER,
+    WIDGET_CTRL_STEPPER,
+    WIDGET_CTRL_TABS,
+} widget_control_type_t;
+
+typedef struct {
+    char                  id[WIDGET_STR_CAP];
+    widget_control_type_t type;
+    char                  label[WIDGET_STR_CAP];
+    char                  action[WIDGET_STR_CAP];
+    char                  value_key[WIDGET_STR_CAP];
+    bool                  network;
+    bool                  state;
+    float                 value;
+    float                 min;
+    float                 max;
+    float                 step;
+    int                   tabs_count;
+    char                  tabs_labels[4][WIDGET_STR_CAP];
+    int                   tabs_selected;
+    char                  status_badge[16];
+} widget_control_t;
 
 typedef struct {
     int16_t x;
@@ -67,6 +95,8 @@ typedef struct {
     bool          bind_weather;
     bool          bind_calendar;
     int           agenda_page_index;
+    widget_control_t controls[8];
+    size_t        control_count;
 } widget_descriptor_t;
 
 typedef struct {
@@ -137,6 +167,22 @@ bool widget_region_render_agenda_list(widget_descriptor_t *w,
                                       int panel_w,
                                       int panel_h,
                                       widget_rect_t *out_dirty_rect);
+
+/* Render a single control_group widget onto work_fb. */
+bool widget_region_render_control_group(widget_descriptor_t *w,
+                                        const widget_spec_t *spec,
+                                        const widget_env_state_t *env,
+                                        const uint8_t *base_fb,
+                                        uint8_t *work_fb,
+                                        int panel_w,
+                                        int panel_h,
+                                        widget_rect_t *out_dirty_rect);
+
+/* Reconcile a control with authoritative server state or offline revert */
+void widget_control_reconcile(widget_control_t *ctrl,
+                              bool success,
+                              bool authoritative_state,
+                              float authoritative_value);
 
 /* Handle touch/gestures inside widget regions (e.g. vertical swipe/tap pagination). */
 widget_touch_result_t widget_region_handle_touch(widget_spec_t *spec,

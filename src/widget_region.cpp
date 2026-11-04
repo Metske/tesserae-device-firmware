@@ -151,6 +151,71 @@ bool widget_spec_parse_json(const char *json_str,
             }
         }
         wdesc->agenda_page_index = 0;
+        /* Parse options.controls for control_group */
+        const cJSON *jopts = cJSON_GetObjectItemCaseSensitive(item, "options");
+        const cJSON *jctrls = jopts ? cJSON_GetObjectItemCaseSensitive(jopts, "controls") : NULL;
+        wdesc->control_count = 0;
+        if (jctrls && cJSON_IsArray(jctrls)) {
+            const cJSON *citem = NULL;
+            cJSON_ArrayForEach(citem, jctrls) {
+                if (wdesc->control_count >= 8) break;
+                widget_control_t *ctrl = &wdesc->controls[wdesc->control_count];
+                memset(ctrl, 0, sizeof(*ctrl));
+
+                const cJSON *cid = cJSON_GetObjectItemCaseSensitive(citem, "id");
+                const cJSON *ctype = cJSON_GetObjectItemCaseSensitive(citem, "type");
+                const cJSON *clabel = cJSON_GetObjectItemCaseSensitive(citem, "label");
+                const cJSON *cact = cJSON_GetObjectItemCaseSensitive(citem, "action");
+                const cJSON *cvkey = cJSON_GetObjectItemCaseSensitive(citem, "value_key");
+                const cJSON *cnet = cJSON_GetObjectItemCaseSensitive(citem, "network");
+                const cJSON *cstate = cJSON_GetObjectItemCaseSensitive(citem, "state");
+                const cJSON *cval = cJSON_GetObjectItemCaseSensitive(citem, "value");
+                const cJSON *cmin = cJSON_GetObjectItemCaseSensitive(citem, "min");
+                const cJSON *cmax = cJSON_GetObjectItemCaseSensitive(citem, "max");
+                const cJSON *cstep = cJSON_GetObjectItemCaseSensitive(citem, "step");
+
+                json_str_copy(ctrl->id, sizeof(ctrl->id), cid);
+                json_str_copy(ctrl->label, sizeof(ctrl->label), clabel);
+                json_str_copy(ctrl->action, sizeof(ctrl->action), cact);
+                json_str_copy(ctrl->value_key, sizeof(ctrl->value_key), cvkey);
+
+                if (ctype && ctype->valuestring) {
+                    if (strcmp(ctype->valuestring, "button") == 0) ctrl->type = WIDGET_CTRL_BUTTON;
+                    else if (strcmp(ctype->valuestring, "switch") == 0) ctrl->type = WIDGET_CTRL_SWITCH;
+                    else if (strcmp(ctype->valuestring, "slider") == 0) ctrl->type = WIDGET_CTRL_SLIDER;
+                    else if (strcmp(ctype->valuestring, "stepper") == 0) ctrl->type = WIDGET_CTRL_STEPPER;
+                    else if (strcmp(ctype->valuestring, "tabs") == 0) ctrl->type = WIDGET_CTRL_TABS;
+                }
+
+                if (ctrl->type == WIDGET_CTRL_TABS) {
+                    ctrl->network = cnet && cJSON_IsTrue(cnet);
+                    const cJSON *topts = cJSON_GetObjectItemCaseSensitive(citem, "options");
+                    if (topts && cJSON_IsArray(topts)) {
+                        const cJSON *tstr = NULL;
+                        cJSON_ArrayForEach(tstr, topts) {
+                            if (ctrl->tabs_count >= 4) break;
+                            json_str_copy(ctrl->tabs_labels[ctrl->tabs_count],
+                                          sizeof(ctrl->tabs_labels[0]), tstr);
+                            ctrl->tabs_count++;
+                        }
+                    }
+                    if (cval) ctrl->tabs_selected = (int)cval->valuedouble;
+                } else {
+                    ctrl->network = !cnet || cJSON_IsTrue(cnet);
+                    if (cstate) {
+                        ctrl->state = cJSON_IsTrue(cstate) ||
+                                      (cJSON_IsString(cstate) && strcmp(cstate->valuestring, "on") == 0);
+                    }
+                    if (cval) ctrl->value = (float)cval->valuedouble;
+                    if (cmin) ctrl->min = (float)cmin->valuedouble;
+                    if (cmax) ctrl->max = (float)cmax->valuedouble;
+                    if (cstep) ctrl->step = (float)cstep->valuedouble;
+                }
+
+                wdesc->control_count++;
+            }
+        }
+
 
         out_spec->widget_count++;
     }
@@ -541,6 +606,146 @@ bool widget_region_render_agenda_list(widget_descriptor_t *w,
     return true;
 }
 
+
+void widget_control_reconcile(widget_control_t *ctrl,
+                              bool success,
+                              bool authoritative_state,
+                              float authoritative_value)
+{
+    if (!ctrl) return;
+    if (success) {
+        ctrl->state = authoritative_state;
+        ctrl->value = authoritative_value;
+        ctrl->status_badge[0] = '\0';
+    } else {
+        ctrl->state = authoritative_state;
+        ctrl->value = authoritative_value;
+        snprintf(ctrl->status_badge, sizeof(ctrl->status_badge), "Offline");
+    }
+}
+
+bool widget_region_render_control_group(widget_descriptor_t *w,
+                                        const widget_spec_t *spec,
+                                        const widget_env_state_t *env,
+                                        const uint8_t *base_fb,
+                                        uint8_t *work_fb,
+                                        int panel_w,
+                                        int panel_h,
+                                        widget_rect_t *out_dirty_rect)
+{
+    (void)spec;
+    (void)env;
+    (void)base_fb;
+    if (!w || !work_fb || panel_w <= 0 || panel_h <= 0) return false;
+
+    widget_rect_t r = w->aligned_rect;
+    if (out_dirty_rect) *out_dirty_rect = r;
+
+    tesserae::ui::FreeInkTarget4bpp target(work_fb, panel_w, panel_h);
+    freeink::ui::Rect clip_r{(int16_t)r.x, (int16_t)r.y, (int16_t)r.w, (int16_t)r.h};
+    target.setClipRect(clip_r);
+
+    target.fill(clip_r, freeink::ui::Paint::solid(freeink::ui::Color::White));
+    target.stroke(clip_r, freeink::ui::Paint::solid(freeink::ui::Color::LightGray), 2, 8);
+
+    if (w->control_count == 0) return true;
+
+    int16_t pad_x = (int16_t)(r.x + 20);
+    int16_t content_w = (int16_t)(r.w - 40);
+    int16_t ctrl_h = (int16_t)((r.h - 40) / w->control_count);
+    if (ctrl_h < 40) ctrl_h = 40;
+
+    for (size_t i = 0; i < w->control_count; ++i) {
+        widget_control_t *ctrl = &w->controls[i];
+        int16_t cy = (int16_t)(r.y + 20 + i * ctrl_h);
+
+        if (ctrl->type == WIDGET_CTRL_TABS && ctrl->tabs_count > 0) {
+            int16_t tab_w = (int16_t)(content_w / ctrl->tabs_count);
+            for (int t = 0; t < ctrl->tabs_count; ++t) {
+                int16_t tx = (int16_t)(pad_x + t * tab_w);
+                freeink::ui::Rect trect{tx, cy, (int16_t)(tab_w - 4), (int16_t)(ctrl_h - 10)};
+                bool sel = (t == ctrl->tabs_selected);
+                target.fill(trect, freeink::ui::Paint::solid(sel ? freeink::ui::Color::Black : freeink::ui::Color::LightGray), 6);
+                freeink::ui::TextStyle tstyle;
+                tstyle.font = tesserae::ui::FreeInkTarget4bpp::SLOT_SMALL;
+                tstyle.color = sel ? freeink::ui::Color::White : freeink::ui::Color::Black;
+                tstyle.align = freeink::ui::TextAlign::Center;
+                target.text(trect, ctrl->tabs_labels[t], tstyle);
+            }
+        } else if (ctrl->type == WIDGET_CTRL_SWITCH) {
+            freeink::ui::TextStyle s_style;
+            s_style.font = tesserae::ui::FreeInkTarget4bpp::SLOT_BODY;
+            s_style.color = freeink::ui::Color::Black;
+            target.text(freeink::ui::Rect{pad_x, cy, (int16_t)(content_w - 140), (int16_t)(ctrl_h - 10)},
+                        ctrl->label, s_style);
+
+            int16_t sw_x = (int16_t)(pad_x + content_w - 80);
+            freeink::ui::Rect sw_track{sw_x, (int16_t)(cy + (ctrl_h / 2) - 14), 64, 28};
+            target.fill(sw_track, freeink::ui::Paint::solid(ctrl->state ? freeink::ui::Color::Black : freeink::ui::Color::LightGray), 14);
+            int16_t knob_x = ctrl->state ? (int16_t)(sw_x + 38) : (int16_t)(sw_x + 2);
+            freeink::ui::Rect sw_knob{knob_x, (int16_t)(cy + (ctrl_h / 2) - 12), 24, 24};
+            target.fill(sw_knob, freeink::ui::Paint::solid(freeink::ui::Color::White), 12);
+        } else if (ctrl->type == WIDGET_CTRL_SLIDER) {
+            freeink::ui::TextStyle sl_style;
+            sl_style.font = tesserae::ui::FreeInkTarget4bpp::SLOT_SMALL;
+            sl_style.color = freeink::ui::Color::Black;
+            char val_buf[32];
+            snprintf(val_buf, sizeof(val_buf), "%s: %.0f", ctrl->label[0] ? ctrl->label : "Level", ctrl->value);
+            target.text(freeink::ui::Rect{pad_x, cy, content_w, 20}, val_buf, sl_style);
+
+            int16_t track_y = (int16_t)(cy + 28);
+            target.line(freeink::ui::Point{pad_x, track_y}, freeink::ui::Point{(int16_t)(pad_x + content_w), track_y}, 4, freeink::ui::Paint::solid(freeink::ui::Color::LightGray));
+            float range = (ctrl->max > ctrl->min) ? (ctrl->max - ctrl->min) : 100.0f;
+            float ratio = (ctrl->value - ctrl->min) / range;
+            if (ratio < 0.0f) ratio = 0.0f;
+            if (ratio > 1.0f) ratio = 1.0f;
+            int16_t fill_w = (int16_t)(content_w * ratio);
+            target.line(freeink::ui::Point{pad_x, track_y}, freeink::ui::Point{(int16_t)(pad_x + fill_w), track_y}, 4, freeink::ui::Paint::solid(freeink::ui::Color::Black));
+            freeink::ui::Rect knob{(int16_t)(pad_x + fill_w - 8), (int16_t)(track_y - 8), 16, 16};
+            target.fill(knob, freeink::ui::Paint::solid(freeink::ui::Color::Black), 8);
+        } else if (ctrl->type == WIDGET_CTRL_STEPPER) {
+            freeink::ui::TextStyle st_style;
+            st_style.font = tesserae::ui::FreeInkTarget4bpp::SLOT_BODY;
+            st_style.color = freeink::ui::Color::Black;
+            target.text(freeink::ui::Rect{pad_x, cy, (int16_t)(content_w - 140), (int16_t)(ctrl_h - 10)},
+                        ctrl->label, st_style);
+
+            char step_buf[32];
+            snprintf(step_buf, sizeof(step_buf), "[-]  %.0f  [+]", ctrl->value);
+            freeink::ui::TextStyle val_style;
+            val_style.font = tesserae::ui::FreeInkTarget4bpp::SLOT_SMALL;
+            val_style.color = freeink::ui::Color::Black;
+            val_style.align = freeink::ui::TextAlign::Right;
+            target.text(freeink::ui::Rect{(int16_t)(pad_x + content_w - 140), cy, 140, (int16_t)(ctrl_h - 10)},
+                        step_buf, val_style);
+        } else {
+            /* Button */
+            freeink::ui::Rect brect{pad_x, (int16_t)(cy + 4), content_w, (int16_t)(ctrl_h - 12)};
+            target.fill(brect, freeink::ui::Paint::solid(freeink::ui::Color::LightGray), 8);
+            target.stroke(brect, freeink::ui::Paint::solid(freeink::ui::Color::DarkGray), 1, 8);
+            freeink::ui::TextStyle bstyle;
+            bstyle.font = tesserae::ui::FreeInkTarget4bpp::SLOT_BODY;
+            bstyle.color = freeink::ui::Color::Black;
+            bstyle.align = freeink::ui::TextAlign::Center;
+            target.text(brect, ctrl->label[0] ? ctrl->label : "Action", bstyle);
+        }
+
+        /* Status badge */
+        if (ctrl->status_badge[0]) {
+            int16_t badge_w = 90;
+            freeink::ui::Rect badge_rect{(int16_t)(pad_x + content_w - badge_w - 90), (int16_t)(cy + 2), badge_w, 20};
+            target.fill(badge_rect, freeink::ui::Paint::solid(freeink::ui::Color::DarkGray), 6);
+            freeink::ui::TextStyle bstyle;
+            bstyle.font = tesserae::ui::FreeInkTarget4bpp::SLOT_SMALL;
+            bstyle.color = freeink::ui::Color::White;
+            bstyle.align = freeink::ui::TextAlign::Center;
+            target.text(badge_rect, ctrl->status_badge, bstyle);
+        }
+    }
+
+    return true;
+}
+
 widget_touch_result_t widget_region_handle_touch(widget_spec_t *spec,
                                                  int x0, int y0,
                                                  int x1, int y1,
@@ -558,6 +763,40 @@ widget_touch_result_t widget_region_handle_touch(widget_spec_t *spec,
 
     for (size_t i = 0; i < spec->widget_count; ++i) {
         widget_descriptor_t *w = &spec->widgets[i];
+        if (w->kind == WIDGET_KIND_CONTROL_GROUP) {
+            int16_t rel_y = (int16_t)(y0 - w->aligned_rect.y - 20);
+            int16_t ctrl_h = (int16_t)((w->aligned_rect.h - 40) / (w->control_count > 0 ? w->control_count : 1));
+            if (ctrl_h < 40) ctrl_h = 40;
+            size_t cidx = (size_t)(rel_y / ctrl_h);
+            if (cidx < w->control_count) {
+                widget_control_t *ctrl = &w->controls[cidx];
+                if (ctrl->type == WIDGET_CTRL_TABS && ctrl->tabs_count > 0) {
+                    int16_t pad_x = (int16_t)(w->aligned_rect.x + 20);
+                    int16_t content_w = (int16_t)(w->aligned_rect.w - 40);
+                    int16_t tab_w = (int16_t)(content_w / ctrl->tabs_count);
+                    int tidx = (x0 - pad_x) / (tab_w > 0 ? tab_w : 1);
+                    if (tidx < 0) tidx = 0;
+                    if (tidx >= ctrl->tabs_count) tidx = ctrl->tabs_count - 1;
+                    ctrl->tabs_selected = tidx;
+                    widget_region_render_control_group(w, spec, env, base_fb, work_fb, panel_w, panel_h, out_dirty);
+                    return WIDGET_TOUCH_HANDLED_DIRTY;
+                } else if (ctrl->network) {
+                    if (ctrl->type == WIDGET_CTRL_SWITCH) {
+                        ctrl->state = !ctrl->state;
+                    }
+                    snprintf(ctrl->status_badge, sizeof(ctrl->status_badge), "Connecting...");
+                    widget_region_render_control_group(w, spec, env, base_fb, work_fb, panel_w, panel_h, out_dirty);
+                    return WIDGET_TOUCH_NETWORK_BURST;
+                } else {
+                    if (ctrl->type == WIDGET_CTRL_SWITCH) {
+                        ctrl->state = !ctrl->state;
+                    }
+                    widget_region_render_control_group(w, spec, env, base_fb, work_fb, panel_w, panel_h, out_dirty);
+                    return WIDGET_TOUCH_HANDLED_DIRTY;
+                }
+            }
+        }
+
         if (w->kind != WIDGET_KIND_AGENDA_LIST) {
             continue;
         }
@@ -630,6 +869,9 @@ bool widget_region_render_all(const widget_spec_t *spec,
         } else if (w->kind == WIDGET_KIND_AGENDA_LIST) {
             ok = widget_region_render_agenda_list(w, spec, env, base_fb, work_fb,
                                                   panel_w, panel_h, &dr);
+        } else if (w->kind == WIDGET_KIND_CONTROL_GROUP) {
+            ok = widget_region_render_control_group(w, spec, env, base_fb, work_fb,
+                                                    panel_w, panel_h, &dr);
         }
 
         if (ok && dr.w > 0 && dr.h > 0) {

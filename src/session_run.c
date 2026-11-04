@@ -1058,13 +1058,20 @@ static void run_session_loop(session_runtime_t *rt,
                                 wspec, st_x0, st_y0, st_x1, st_y1, is_tap,
                                 &env, rt->base_fb, rt->work_fb,
                                 rt->sess.panel_w, rt->sess.panel_h, &dr);
-                            if (wres == WIDGET_TOUCH_HANDLED_DIRTY) {
+                            if (wres == WIDGET_TOUCH_HANDLED_DIRTY || wres == WIDGET_TOUCH_NETWORK_BURST) {
                                 widget_handled = true;
                                 fi_dirty_rect_t fi_dirty = {dr.x, dr.y, dr.w, dr.h, true};
                                 queue_overlay_dirty_locked(rt, &fi_dirty, false);
                                 xSemaphoreGive(rt->work_sem);
-                                ESP_LOGI(TAG, "widget handled touch/pagination dirty=[%d,%d %dx%d]",
-                                         dr.x, dr.y, dr.w, dr.h);
+                                ESP_LOGI(TAG, "widget handled touch dirty=[%d,%d %dx%d]%s",
+                                         dr.x, dr.y, dr.w, dr.h,
+                                         (wres == WIDGET_TOUCH_NETWORK_BURST) ? " (Radio Burst)" : "");
+                                if (wres == WIDGET_TOUCH_NETWORK_BURST) {
+                                    if (!rt->live_wifi_enabled) {
+                                        rt->live_wifi_enabled = true;
+                                        rt->wifi_toggle_pending = true;
+                                    }
+                                }
                             }
                         }
 
