@@ -310,6 +310,14 @@ bool deck_cache_read_frame(const char *deck_id, const char *digest,
     return deck_cache_read_frame_ex(deck_id, digest, expect_bytes, out, NULL, NULL);
 }
 
+bool deck_cache_has_frame(const char *deck_id, const char *digest)
+{
+    char path[320];
+    if (!frame_path(deck_id, digest, path, sizeof path)) return false;
+    struct stat st;
+    return (stat(path, &st) == 0 && st.st_size > 0);
+}
+
 bool deck_cache_write_frame(const char *deck_id, const char *digest,
                             const uint8_t *data, size_t len, uint32_t expect_bytes)
 {

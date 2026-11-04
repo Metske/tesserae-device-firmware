@@ -32,6 +32,7 @@ bool deck_cache_read_frame(const char *deck_id, const char *digest,
 bool deck_cache_read_frame_ex(const char *deck_id, const char *digest,
                               uint32_t expect_bytes, uint8_t **out_raw,
                               uint8_t **out_blob, size_t *out_blob_len);
+bool deck_cache_has_frame(const char *deck_id, const char *digest);
 
 /* Verify + write a fetched frame (tmp file + rename, so a power cut never
  * leaves a plausible-looking partial). Rejects digest/length mismatches. */

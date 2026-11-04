@@ -854,7 +854,12 @@ static void sleep_forever_or_until_timer(void)
      * mode and arms ext0 itself, and the mask below stays 0 (#327). Off by
      * default -> touch_wake_mask stays 0 and this is just the buttons. */
     uint64_t touch_wake_mask = 0;
-    if (rest_config_get()->touch_enabled) {
+#if defined(TESSERAE_BOARD_SEEED_E1003)
+    bool touch_active = true;
+#else
+    bool touch_active = rest_config_get()->touch_enabled;
+#endif
+    if (touch_active) {
         touch_prepare_sleep(rest_config_get()->touch_gesture);
         touch_wake_mask = touch_sleep_wake_mask();   /* 0 when INT is armed as ext0 */
     } else {
@@ -3409,7 +3414,12 @@ void app_main(void)
     /* Touch shares the button ext1 ANY_LOW mask (TP_INT is active-low); a touch
      * wake is an ext1 wake whose status latch shows the TP_INT bit and no button
      * bit (so buttons_which_woke() above returned BTN_NONE for it). */
-    bool woke_by_touch = rest_config_get()->touch_enabled &&
+#if defined(TESSERAE_BOARD_SEEED_E1003)
+    bool touch_active_wake = true;
+#else
+    bool touch_active_wake = rest_config_get()->touch_enabled;
+#endif
+    bool woke_by_touch = touch_active_wake &&
                          (touch_woke_by_gesture() ||   /* ext0, after a gesture-mode sleep */
                           (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT1 &&
                            (esp_sleep_get_ext1_wakeup_status() & TOUCH_INT_WAKE_MASK)));
@@ -3927,6 +3937,18 @@ void app_main(void)
     if (touch3_tap && !epd_partial_is_rect_safe(EPD_RF_DU))
         rest_config_set_frame_etag("");
 #endif
+
+    if (rest_config_get()->last_frame_etag[0] != '\0') {
+        const deck_manifest_t *cur_dm = deck_active_manifest();
+        bool have_cached = false;
+        if (cur_dm && cur_dm->deck_id[0]) {
+            have_cached = deck_cache_has_frame(cur_dm->deck_id, rest_config_get()->last_frame_etag);
+        }
+        if (!have_cached) {
+            ESP_LOGI(TAG, "active frame '%s' not cached on storage; forcing fresh fetch", rest_config_get()->last_frame_etag);
+            rest_config_set_frame_etag("");
+        }
+    }
 
     /* 2. Frame metadata, with If-None-Match for the ETag/304 dedup. */
     rest_frame_out_t fo;
