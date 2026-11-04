@@ -451,12 +451,13 @@ void isess_complete_work(interactive_session_t *s, const isess_work_t *work,
         s->displayed_index = work->collection_index;
         s->last_fast_done_ms = now_ms;
         union_dirty_rect(s, work->rx, work->ry, work->rw, work->rh);
-    } else if (work->kind == ISESS_WORK_SETTLE_PASS && success) {
-        if (!s->dirty_since_settle_start &&
-            strcmp(s->target_id, s->displayed_id) == 0) {
-            s->needs_settle = false;
-            s->dirty_x = s->dirty_y = s->dirty_w = s->dirty_h = 0;
-        }
+    } else if (work->kind == ISESS_WORK_FAST_PASS && !success) {
+        /* Failed to paint target frame; revert target so worker doesn't spin in retry loop */
+        snprintf(s->target_id, sizeof(s->target_id), "%s", s->displayed_id);
+        snprintf(s->target_digest, sizeof(s->target_digest), "%s", s->displayed_digest);
+    } else if (work->kind == ISESS_WORK_SETTLE_PASS) {
+        s->needs_settle = false;
+        s->dirty_x = s->dirty_y = s->dirty_w = s->dirty_h = 0;
     } else if (work->kind == ISESS_WORK_PREFETCH && !success) {
         if (work->digest[0] && !is_skipped_prefetch(s, work->digest) &&
             s->n_prefetch_skip < ISESS_MAX_PREFETCH) {

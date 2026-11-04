@@ -409,6 +409,6 @@ int32_t deck_cache_frame_age_s(const char *deck_id, const char *digest)
     if (stat(path, &st) != 0) return INT32_MAX;
     time_t now = time(NULL);
     if (now < 1600000000 || st.st_mtime < 1600000000 || now < st.st_mtime)
-        return INT32_MAX;
+        return 0;   /* uninitialised RTC or FAT timestamp: assume frame is fresh for offline nav */
     return (int32_t)(now - st.st_mtime);
 }
