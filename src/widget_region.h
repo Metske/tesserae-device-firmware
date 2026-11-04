@@ -14,7 +14,9 @@ extern "C" {
 
 #define WIDGET_MAX_COUNT           8
 #define WIDGET_HOURLY_MAX         24
+#define WIDGET_EVENT_MAX          32
 #define WIDGET_STR_CAP            32
+#define WIDGET_EVENT_STR_CAP      64
 
 typedef enum {
     WIDGET_KIND_UNKNOWN = 0,
@@ -22,6 +24,12 @@ typedef enum {
     WIDGET_KIND_AGENDA_LIST,
     WIDGET_KIND_CONTROL_GROUP,
 } widget_kind_t;
+
+typedef enum {
+    WIDGET_TOUCH_NONE = 0,
+    WIDGET_TOUCH_HANDLED_DIRTY,   /* Handled internally; work_fb re-rendered, out_dirty set */
+    WIDGET_TOUCH_UNCLAIMED,       /* Touch fell outside or wasn't handled by any widget */
+} widget_touch_result_t;
 
 typedef struct {
     int16_t x;
@@ -38,6 +46,17 @@ typedef struct {
 } widget_hourly_forecast_t;
 
 typedef struct {
+    char    id[WIDGET_STR_CAP];
+    char    title[WIDGET_EVENT_STR_CAP];
+    int64_t start_epoch;
+    int64_t end_epoch;
+    char    date_str[WIDGET_STR_CAP];
+    char    time_str[WIDGET_STR_CAP];
+    char    location[WIDGET_STR_CAP];
+    bool    all_day;
+} widget_calendar_event_t;
+
+typedef struct {
     char          id[WIDGET_STR_CAP];
     widget_kind_t kind;
     widget_rect_t rect;          /* Raw panel-space rect from spec */
@@ -46,13 +65,17 @@ typedef struct {
     bool          bind_env;
     bool          bind_battery;
     bool          bind_weather;
+    bool          bind_calendar;
+    int           agenda_page_index;
 } widget_descriptor_t;
 
 typedef struct {
-    widget_descriptor_t widgets[WIDGET_MAX_COUNT];
-    size_t              widget_count;
+    widget_descriptor_t     widgets[WIDGET_MAX_COUNT];
+    size_t                  widget_count;
     widget_hourly_forecast_t hourly[WIDGET_HOURLY_MAX];
-    size_t              hourly_count;
+    size_t                  hourly_count;
+    widget_calendar_event_t events[WIDGET_EVENT_MAX];
+    size_t                  event_count;
 } widget_spec_t;
 
 typedef struct {
@@ -98,6 +121,34 @@ bool widget_region_render_status_strip(const widget_descriptor_t *w,
                                        int panel_w,
                                        int panel_h,
                                        widget_rect_t *out_dirty_rect);
+
+/* Get active (future/current) events from spec, filtering out past events */
+size_t widget_agenda_get_active_events(const widget_spec_t *spec,
+                                       int64_t now_epoch,
+                                       const widget_calendar_event_t **out_events,
+                                       size_t max_out);
+
+/* Render a single agenda_list widget onto work_fb. */
+bool widget_region_render_agenda_list(widget_descriptor_t *w,
+                                      const widget_spec_t *spec,
+                                      const widget_env_state_t *env,
+                                      const uint8_t *base_fb,
+                                      uint8_t *work_fb,
+                                      int panel_w,
+                                      int panel_h,
+                                      widget_rect_t *out_dirty_rect);
+
+/* Handle touch/gestures inside widget regions (e.g. vertical swipe/tap pagination). */
+widget_touch_result_t widget_region_handle_touch(widget_spec_t *spec,
+                                                 int x0, int y0,
+                                                 int x1, int y1,
+                                                 bool is_tap,
+                                                 const widget_env_state_t *env,
+                                                 const uint8_t *base_fb,
+                                                 uint8_t *work_fb,
+                                                 int panel_w,
+                                                 int panel_h,
+                                                 widget_rect_t *out_dirty);
 
 /* Find matching hourly forecast slice for now_epoch */
 const widget_hourly_forecast_t *widget_find_hourly_forecast(const widget_spec_t *spec,

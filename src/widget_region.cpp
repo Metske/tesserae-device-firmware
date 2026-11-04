@@ -132,20 +132,25 @@ bool widget_spec_parse_json(const char *json_str,
             const cJSON *b_env = cJSON_GetObjectItemCaseSensitive(jbind, "env");
             const cJSON *b_batt = cJSON_GetObjectItemCaseSensitive(jbind, "battery");
             const cJSON *b_weather = cJSON_GetObjectItemCaseSensitive(jbind, "weather");
+            const cJSON *b_cal = cJSON_GetObjectItemCaseSensitive(jbind, "calendar");
 
             wdesc->bind_clock = b_clock && cJSON_IsTrue(b_clock);
             wdesc->bind_env = b_env && cJSON_IsTrue(b_env);
             wdesc->bind_battery = b_batt && cJSON_IsTrue(b_batt);
             wdesc->bind_weather = (b_weather && (cJSON_IsTrue(b_weather) || cJSON_IsString(b_weather)));
+            wdesc->bind_calendar = (b_cal && (cJSON_IsTrue(b_cal) || cJSON_IsString(b_cal)));
         } else {
-            /* Defaults for status_strip */
+            /* Defaults */
             if (kind == WIDGET_KIND_STATUS_STRIP) {
                 wdesc->bind_clock = true;
                 wdesc->bind_env = true;
                 wdesc->bind_battery = true;
                 wdesc->bind_weather = true;
+            } else if (kind == WIDGET_KIND_AGENDA_LIST) {
+                wdesc->bind_calendar = true;
             }
         }
+        wdesc->agenda_page_index = 0;
 
         out_spec->widget_count++;
     }
@@ -171,35 +176,70 @@ bool widget_spec_parse_datasets_json(const char *json_str,
                                      : cJSON_GetObjectItemCaseSensitive(root, "forecast");
     const cJSON *hourly = forecast ? cJSON_GetObjectItemCaseSensitive(forecast, "hourly") : NULL;
 
-    if (!hourly || !cJSON_IsArray(hourly)) {
-        cJSON_Delete(root);
-        return false;
+    inout_spec->hourly_count = 0;
+    if (hourly && cJSON_IsArray(hourly)) {
+        const cJSON *item = NULL;
+        cJSON_ArrayForEach(item, hourly) {
+            if (inout_spec->hourly_count >= WIDGET_HOURLY_MAX) {
+                break;
+            }
+
+            const cJSON *jepoch = cJSON_GetObjectItemCaseSensitive(item, "epoch");
+            const cJSON *jtemp = cJSON_GetObjectItemCaseSensitive(item, "temp_c");
+            const cJSON *jcond = cJSON_GetObjectItemCaseSensitive(item, "condition");
+            const cJSON *jicon = cJSON_GetObjectItemCaseSensitive(item, "icon");
+
+            if (!jepoch) {
+                continue;
+            }
+
+            widget_hourly_forecast_t *hf = &inout_spec->hourly[inout_spec->hourly_count];
+            memset(hf, 0, sizeof(*hf));
+            hf->epoch = (int64_t)jepoch->valuedouble;
+            hf->temp_c = jtemp ? (float)jtemp->valuedouble : 20.0f;
+            json_str_copy(hf->condition, sizeof(hf->condition), jcond);
+            json_str_copy(hf->icon, sizeof(hf->icon), jicon);
+
+            inout_spec->hourly_count++;
+        }
     }
 
-    inout_spec->hourly_count = 0;
-    const cJSON *item = NULL;
-    cJSON_ArrayForEach(item, hourly) {
-        if (inout_spec->hourly_count >= WIDGET_HOURLY_MAX) {
-            break;
+    /* Parse calendar.upcoming */
+    const cJSON *cal = datasets ? cJSON_GetObjectItemCaseSensitive(datasets, "calendar")
+                                : cJSON_GetObjectItemCaseSensitive(root, "calendar");
+    const cJSON *upcoming = cal ? cJSON_GetObjectItemCaseSensitive(cal, "upcoming") : NULL;
+
+    inout_spec->event_count = 0;
+    if (upcoming && cJSON_IsArray(upcoming)) {
+        const cJSON *eitem = NULL;
+        cJSON_ArrayForEach(eitem, upcoming) {
+            if (inout_spec->event_count >= WIDGET_EVENT_MAX) {
+                break;
+            }
+
+            const cJSON *je_id = cJSON_GetObjectItemCaseSensitive(eitem, "id");
+            const cJSON *je_title = cJSON_GetObjectItemCaseSensitive(eitem, "title");
+            const cJSON *je_start = cJSON_GetObjectItemCaseSensitive(eitem, "start_epoch");
+            const cJSON *je_end = cJSON_GetObjectItemCaseSensitive(eitem, "end_epoch");
+            const cJSON *je_date = cJSON_GetObjectItemCaseSensitive(eitem, "date_str");
+            const cJSON *je_time = cJSON_GetObjectItemCaseSensitive(eitem, "time_str");
+            const cJSON *je_loc = cJSON_GetObjectItemCaseSensitive(eitem, "location");
+            const cJSON *je_allday = cJSON_GetObjectItemCaseSensitive(eitem, "all_day");
+
+            widget_calendar_event_t *ev = &inout_spec->events[inout_spec->event_count];
+            memset(ev, 0, sizeof(*ev));
+
+            json_str_copy(ev->id, sizeof(ev->id), je_id);
+            json_str_copy(ev->title, sizeof(ev->title), je_title);
+            if (je_start) ev->start_epoch = (int64_t)je_start->valuedouble;
+            if (je_end) ev->end_epoch = (int64_t)je_end->valuedouble;
+            json_str_copy(ev->date_str, sizeof(ev->date_str), je_date);
+            json_str_copy(ev->time_str, sizeof(ev->time_str), je_time);
+            json_str_copy(ev->location, sizeof(ev->location), je_loc);
+            ev->all_day = je_allday && cJSON_IsTrue(je_allday);
+
+            inout_spec->event_count++;
         }
-
-        const cJSON *jepoch = cJSON_GetObjectItemCaseSensitive(item, "epoch");
-        const cJSON *jtemp = cJSON_GetObjectItemCaseSensitive(item, "temp_c");
-        const cJSON *jcond = cJSON_GetObjectItemCaseSensitive(item, "condition");
-        const cJSON *jicon = cJSON_GetObjectItemCaseSensitive(item, "icon");
-
-        if (!jepoch) {
-            continue;
-        }
-
-        widget_hourly_forecast_t *hf = &inout_spec->hourly[inout_spec->hourly_count];
-        memset(hf, 0, sizeof(*hf));
-        hf->epoch = (int64_t)jepoch->valuedouble;
-        hf->temp_c = jtemp ? (float)jtemp->valuedouble : 20.0f;
-        json_str_copy(hf->condition, sizeof(hf->condition), jcond);
-        json_str_copy(hf->icon, sizeof(hf->icon), jicon);
-
-        inout_spec->hourly_count++;
     }
 
     cJSON_Delete(root);
@@ -330,6 +370,239 @@ bool widget_region_render_status_strip(const widget_descriptor_t *w,
     return true;
 }
 
+size_t widget_agenda_get_active_events(const widget_spec_t *spec,
+                                       int64_t now_epoch,
+                                       const widget_calendar_event_t **out_events,
+                                       size_t max_out)
+{
+    if (!spec || spec->event_count == 0) {
+        return 0;
+    }
+
+    size_t count = 0;
+    for (size_t i = 0; i < spec->event_count; ++i) {
+        const widget_calendar_event_t *ev = &spec->events[i];
+        if (now_epoch > 0 && ev->end_epoch > 0 && ev->end_epoch < now_epoch) {
+            continue;
+        }
+
+        if (out_events && count < max_out) {
+            out_events[count] = ev;
+        }
+        count++;
+    }
+    return count;
+}
+
+bool widget_region_render_agenda_list(widget_descriptor_t *w,
+                                      const widget_spec_t *spec,
+                                      const widget_env_state_t *env,
+                                      const uint8_t *base_fb,
+                                      uint8_t *work_fb,
+                                      int panel_w,
+                                      int panel_h,
+                                      widget_rect_t *out_dirty_rect)
+{
+    (void)base_fb;
+    if (!w || !work_fb || panel_w <= 0 || panel_h <= 0) {
+        return false;
+    }
+
+    widget_rect_t r = w->aligned_rect;
+    if (out_dirty_rect) {
+        *out_dirty_rect = r;
+    }
+
+    tesserae::ui::FreeInkTarget4bpp target(work_fb, panel_w, panel_h);
+    freeink::ui::Rect clip_r{(int16_t)r.x, (int16_t)r.y, (int16_t)r.w, (int16_t)r.h};
+    target.setClipRect(clip_r);
+
+    target.fill(clip_r, freeink::ui::Paint::solid(freeink::ui::Color::White));
+    target.stroke(clip_r, freeink::ui::Paint::solid(freeink::ui::Color::LightGray), 2, 8);
+
+    int16_t cur_y = (int16_t)(r.y + 16);
+    int16_t pad_x = (int16_t)(r.x + 20);
+    int16_t content_w = (int16_t)(r.w - 40);
+
+    freeink::ui::TextStyle title_style;
+    title_style.font = tesserae::ui::FreeInkTarget4bpp::SLOT_TITLE;
+    title_style.color = freeink::ui::Color::Black;
+    target.text(freeink::ui::Rect{pad_x, cur_y, (int16_t)(content_w - 120), 40},
+                "Agenda",
+                title_style);
+
+    int64_t now_ep = (env && env->now_epoch > 0) ? env->now_epoch : 0;
+    const widget_calendar_event_t *active_events[WIDGET_EVENT_MAX];
+    size_t active_count = widget_agenda_get_active_events(spec, now_ep, active_events, WIDGET_EVENT_MAX);
+
+    int16_t item_h = 72;
+    int items_per_page = (r.h - 120) / item_h;
+    if (items_per_page < 1) items_per_page = 1;
+    int total_pages = (int)((active_count + items_per_page - 1) / items_per_page);
+    if (total_pages < 1) total_pages = 1;
+
+    if (w->agenda_page_index >= total_pages) w->agenda_page_index = total_pages - 1;
+    if (w->agenda_page_index < 0) w->agenda_page_index = 0;
+
+    char page_buf[32];
+    snprintf(page_buf, sizeof(page_buf), "Page %d/%d", w->agenda_page_index + 1, total_pages);
+    freeink::ui::TextStyle page_style;
+    page_style.font = tesserae::ui::FreeInkTarget4bpp::SLOT_SMALL;
+    page_style.color = freeink::ui::Color::DarkGray;
+    page_style.align = freeink::ui::TextAlign::Right;
+    target.text(freeink::ui::Rect{(int16_t)(pad_x + content_w - 120), cur_y, 120, 30},
+                page_buf,
+                page_style);
+
+    cur_y = (int16_t)(cur_y + 44);
+    target.line(freeink::ui::Point{pad_x, cur_y},
+                freeink::ui::Point{(int16_t)(pad_x + content_w), cur_y},
+                1,
+                freeink::ui::Paint::solid(freeink::ui::Color::LightGray));
+    cur_y = (int16_t)(cur_y + 12);
+
+    if (active_count == 0) {
+        freeink::ui::TextStyle empty_style;
+        empty_style.font = tesserae::ui::FreeInkTarget4bpp::SLOT_BODY;
+        empty_style.color = freeink::ui::Color::DarkGray;
+        empty_style.align = freeink::ui::TextAlign::Center;
+        target.text(freeink::ui::Rect{pad_x, (int16_t)(r.y + (r.h / 2) - 20), content_w, 40},
+                    "No upcoming events",
+                    empty_style);
+        return true;
+    }
+
+    size_t start_idx = (size_t)(w->agenda_page_index * items_per_page);
+    size_t end_idx = start_idx + items_per_page;
+    if (end_idx > active_count) end_idx = active_count;
+
+    for (size_t i = start_idx; i < end_idx; ++i) {
+        const widget_calendar_event_t *ev = active_events[i];
+
+        char time_line[96];
+        if (ev->date_str[0] && ev->time_str[0]) {
+            snprintf(time_line, sizeof(time_line), "%s  %s", ev->date_str, ev->time_str);
+        } else if (ev->time_str[0]) {
+            snprintf(time_line, sizeof(time_line), "%s", ev->time_str);
+        } else if (ev->date_str[0]) {
+            snprintf(time_line, sizeof(time_line), "%s", ev->date_str);
+        } else {
+            snprintf(time_line, sizeof(time_line), "Upcoming");
+        }
+
+        freeink::ui::TextStyle sub_style;
+        sub_style.font = tesserae::ui::FreeInkTarget4bpp::SLOT_SMALL;
+        sub_style.color = freeink::ui::Color::DarkGray;
+        target.text(freeink::ui::Rect{pad_x, cur_y, content_w, 24},
+                    time_line,
+                    sub_style);
+
+        freeink::ui::TextStyle ev_title_style;
+        ev_title_style.font = tesserae::ui::FreeInkTarget4bpp::SLOT_BODY;
+        ev_title_style.color = freeink::ui::Color::Black;
+        target.text(freeink::ui::Rect{pad_x, (int16_t)(cur_y + 24), content_w, 32},
+                    ev->title,
+                    ev_title_style);
+
+        cur_y = (int16_t)(cur_y + item_h);
+        if (i + 1 < end_idx) {
+            target.line(freeink::ui::Point{pad_x, (int16_t)(cur_y - 8)},
+                        freeink::ui::Point{(int16_t)(pad_x + content_w), (int16_t)(cur_y - 8)},
+                        1,
+                        freeink::ui::Paint::solid(freeink::ui::Color::LightGray));
+        }
+    }
+
+    if (total_pages > 1) {
+        int16_t footer_y = (int16_t)(r.y + r.h - 40);
+        target.line(freeink::ui::Point{pad_x, footer_y},
+                    freeink::ui::Point{(int16_t)(pad_x + content_w), footer_y},
+                    1,
+                    freeink::ui::Paint::solid(freeink::ui::Color::LightGray));
+
+        freeink::ui::TextStyle btn_style;
+        btn_style.font = tesserae::ui::FreeInkTarget4bpp::SLOT_SMALL;
+        btn_style.color = freeink::ui::Color::Black;
+
+        if (w->agenda_page_index > 0) {
+            target.text(freeink::ui::Rect{pad_x, (int16_t)(footer_y + 8), 100, 24},
+                        "< Prev",
+                        btn_style);
+        }
+
+        if (w->agenda_page_index + 1 < total_pages) {
+            btn_style.align = freeink::ui::TextAlign::Right;
+            target.text(freeink::ui::Rect{(int16_t)(pad_x + content_w - 100), (int16_t)(footer_y + 8), 100, 24},
+                        "Next >",
+                        btn_style);
+        }
+    }
+
+    return true;
+}
+
+widget_touch_result_t widget_region_handle_touch(widget_spec_t *spec,
+                                                 int x0, int y0,
+                                                 int x1, int y1,
+                                                 bool is_tap,
+                                                 const widget_env_state_t *env,
+                                                 const uint8_t *base_fb,
+                                                 uint8_t *work_fb,
+                                                 int panel_w,
+                                                 int panel_h,
+                                                 widget_rect_t *out_dirty)
+{
+    if (!spec || spec->widget_count == 0 || !work_fb) {
+        return WIDGET_TOUCH_UNCLAIMED;
+    }
+
+    for (size_t i = 0; i < spec->widget_count; ++i) {
+        widget_descriptor_t *w = &spec->widgets[i];
+        if (w->kind != WIDGET_KIND_AGENDA_LIST) {
+            continue;
+        }
+
+        if (x0 < w->aligned_rect.x || x0 >= w->aligned_rect.x + w->aligned_rect.w ||
+            y0 < w->aligned_rect.y || y0 >= w->aligned_rect.y + w->aligned_rect.h) {
+            continue;
+        }
+
+        int dx = x1 - x0;
+        int dy = y1 - y0;
+
+        if (!is_tap && abs(dy) >= 40 && abs(dy) > abs(dx)) {
+            if (dy < 0) {
+                w->agenda_page_index++;
+            } else {
+                if (w->agenda_page_index > 0) {
+                    w->agenda_page_index--;
+                }
+            }
+            widget_region_render_agenda_list(w, spec, env, base_fb, work_fb,
+                                             panel_w, panel_h, out_dirty);
+            return WIDGET_TOUCH_HANDLED_DIRTY;
+        }
+
+        if (is_tap) {
+            int16_t bot_y = (int16_t)(w->aligned_rect.y + w->aligned_rect.h - 60);
+            if (y0 >= bot_y) {
+                if (x0 < w->aligned_rect.x + (w->aligned_rect.w / 2)) {
+                    if (w->agenda_page_index > 0) {
+                        w->agenda_page_index--;
+                    }
+                } else {
+                    w->agenda_page_index++;
+                }
+                widget_region_render_agenda_list(w, spec, env, base_fb, work_fb,
+                                                 panel_w, panel_h, out_dirty);
+                return WIDGET_TOUCH_HANDLED_DIRTY;
+            }
+        }
+    }
+
+    return WIDGET_TOUCH_UNCLAIMED;
+}
+
 bool widget_region_render_all(const widget_spec_t *spec,
                               const widget_env_state_t *env,
                               const uint8_t *base_fb,
@@ -346,7 +619,7 @@ bool widget_region_render_all(const widget_spec_t *spec,
     int16_t min_x = panel_w, min_y = panel_h, max_x = 0, max_y = 0;
 
     for (size_t i = 0; i < spec->widget_count; ++i) {
-        const widget_descriptor_t *w = &spec->widgets[i];
+        widget_descriptor_t *w = (widget_descriptor_t *)&spec->widgets[i];
         widget_rect_t dr;
         memset(&dr, 0, sizeof(dr));
 
@@ -354,6 +627,9 @@ bool widget_region_render_all(const widget_spec_t *spec,
         if (w->kind == WIDGET_KIND_STATUS_STRIP) {
             ok = widget_region_render_status_strip(w, spec, env, base_fb, work_fb,
                                                    panel_w, panel_h, &dr);
+        } else if (w->kind == WIDGET_KIND_AGENDA_LIST) {
+            ok = widget_region_render_agenda_list(w, spec, env, base_fb, work_fb,
+                                                  panel_w, panel_h, &dr);
         }
 
         if (ok && dr.w > 0 && dr.h > 0) {

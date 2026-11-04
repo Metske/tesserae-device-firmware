@@ -1039,15 +1039,46 @@ static void run_session_loop(session_runtime_t *rt,
                     }
 
                     if (!modal_handled) {
-                        isess_input_result_t res = isess_on_touch(
-                            &rt->sess, st_x0, st_y0, st_x1, st_y1, dur, t_cur);
-                        ESP_LOGI(TAG, "touch (%d,%d)->(%d,%d) %ums -> %s",
-                                 st_x0, st_y0, st_x1, st_y1, (unsigned)dur,
-                                 res == ISESS_INPUT_HANDLED_LOCAL
-                                     ? rt->sess.target_id
-                                     : "unhandled");
-                        if (res == ISESS_INPUT_HANDLED_LOCAL) {
-                            xSemaphoreGive(rt->work_sem);
+                        /* Check if touch routes to a widget region (e.g. agenda_list pagination) */
+                        widget_spec_t *wspec = widget_region_get_current_spec();
+                        bool widget_handled = false;
+                        if (wspec && wspec->widget_count > 0 && rt->work_fb && rt->base_fb) {
+                            widget_env_state_t env;
+                            memset(&env, 0, sizeof(env));
+                            env.now_epoch = (int64_t)time(NULL);
+                            env.tz_offset_s = rest_config_get()->tz_offset_s;
+                            env.battery_pct = rt->cached_telemetry.battery_pct;
+                            env.has_sht4x = rt->cached_telemetry.has_sht4x;
+                            env.temperature_c = rt->cached_telemetry.temperature_c;
+                            env.humidity_pct = rt->cached_telemetry.humidity_pct;
+
+                            bool is_tap = (abs(st_x1 - st_x0) <= 20 && abs(st_y1 - st_y0) <= 20);
+                            widget_rect_t dr;
+                            widget_touch_result_t wres = widget_region_handle_touch(
+                                wspec, st_x0, st_y0, st_x1, st_y1, is_tap,
+                                &env, rt->base_fb, rt->work_fb,
+                                rt->sess.panel_w, rt->sess.panel_h, &dr);
+                            if (wres == WIDGET_TOUCH_HANDLED_DIRTY) {
+                                widget_handled = true;
+                                fi_dirty_rect_t fi_dirty = {dr.x, dr.y, dr.w, dr.h, true};
+                                queue_overlay_dirty_locked(rt, &fi_dirty, false);
+                                xSemaphoreGive(rt->work_sem);
+                                ESP_LOGI(TAG, "widget handled touch/pagination dirty=[%d,%d %dx%d]",
+                                         dr.x, dr.y, dr.w, dr.h);
+                            }
+                        }
+
+                        if (!widget_handled) {
+                            isess_input_result_t res = isess_on_touch(
+                                &rt->sess, st_x0, st_y0, st_x1, st_y1, dur, t_cur);
+                            ESP_LOGI(TAG, "touch (%d,%d)->(%d,%d) %ums -> %s",
+                                     st_x0, st_y0, st_x1, st_y1, (unsigned)dur,
+                                     res == ISESS_INPUT_HANDLED_LOCAL
+                                         ? rt->sess.target_id
+                                         : "unhandled");
+                            if (res == ISESS_INPUT_HANDLED_LOCAL) {
+                                xSemaphoreGive(rt->work_sem);
+                            }
                         }
                     }
                     bool do_wifi_toggle = rt->wifi_toggle_pending;
