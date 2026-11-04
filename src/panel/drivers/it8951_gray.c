@@ -22,6 +22,7 @@
 #if defined(PANEL_DRIVER_IT8951_GRAY)
 
 #include "drivers/it8951_gray.h"
+#include "sdcard.h"             /* sdcard_mounted(): keep rails high while SD active */
 #include "../busy_sleep.h"
 #include "diag_run.h"           /* timeouts latch a report for the next status */
 
@@ -614,7 +615,7 @@ static void stream_row(const uint8_t *row, uint8_t *scratch)
 }
 
 /* Load a full-frame 4bpp buffer into controller DRAM and GC16-refresh it. */
-#define IT8951_BATCH_ROWS 16
+#define IT8951_BATCH_ROWS 1
 
 static bool it8951_load_full_to_slot(int slot, const uint8_t *fb,
                                      bool (*should_abort)(void *ctx),
@@ -671,7 +672,13 @@ static bool it8951_load_full_to_slot(int slot, const uint8_t *fb,
 
 static int it8951_slot_count(void)
 {
-    return IT8951_SLOTS;
+    /* Seeed_v.0.1 IT8951 firmware only executes DPY_AREA (0x0034) from the
+     * primary s_img_buf_addr (0x003dbe78) and ignores Waveshare's custom
+     * DPY_BUF_AREA (0x0037). Returning 0 routes all interactive session fast
+     * passes, settle passes, and modal partial updates through the standard
+     * LD_IMG_AREA (0x0021) + DPY_AREA (0x0034) path while keeping PSRAM
+     * neighbor prefetch active. */
+    return 0;
 }
 
 static bool it8951_preload_slot(int slot, const uint8_t *fb,
@@ -1018,6 +1025,14 @@ static void it8951_show_palette_sweep(void) { it8951_show_color_bars(); }
 static void it8951_sleep(void)
 {
     write_cmd(SLEEP);
+    /* If /sdcard is mounted on the shared SPI bus, keep the IT8951 power rails
+     * high until sdcard_prepare_sleep() runs right before deep sleep. Cutting
+     * EPD_PIN_EN / EPD_PIN_VCC_EN while the SD card is still in use causes the
+     * unpowered IT8951 ESD diodes to clamp MISO, failing post-paint SD writes
+     * (deck_sync_tail, session state). */
+    if (sdcard_mounted()) {
+        return;
+    }
     gpio_set_level(EPD_PIN_EN, 0);
     gpio_set_level(EPD_PIN_VCC_EN, 0);
 #ifdef BOARD_EPD_HOLD_RAILS_IN_SLEEP

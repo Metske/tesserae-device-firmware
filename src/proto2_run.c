@@ -27,6 +27,7 @@
 #include "proto2.h"
 #include "rest_config.h"
 #include "cache_storage.h"
+#include "wifi_manager.h"
 
 static const char *TAG = "proto2";
 
@@ -203,6 +204,9 @@ static void rq_push(const p2_report_t *rep)
 
 static bool report_send(const p2_report_t *rep)
 {
+    char ip[16];
+    if (!wifi_manager_get_sta_ip(ip, sizeof ip)) return false;
+
     char outcome[24];
     rest_status_t st = rest_post_tap(rep->region_id, rep->gesture, rep->value,
                                      rep->digest, rep->event_id,

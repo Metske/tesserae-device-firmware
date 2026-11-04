@@ -643,14 +643,18 @@ static void display_worker_task(void *arg)
                                  "%s", work.digest);
                         if (!rt->modal.is_open) {
                             memcpy(rt->work_fb, raw, work.expect_bytes);
+                            widget_rect_t dr;
+                            render_widgets_on_work_fb_locked(rt, &dr);
                         }
                     }
+                    const uint8_t *paint_fb = (rt->work_fb && !rt->modal.is_open)
+                                              ? rt->work_fb : raw;
                     xSemaphoreGive(rt->mux);
                     if (epd_supports_partial()) {
-                        epd_display_partial_mode(raw, work.rx, work.ry,
+                        epd_display_partial_mode(paint_fb, work.rx, work.ry,
                                                  work.rw, work.rh, EPD_RF_GRAY);
                     } else {
-                        epd_display_frame(raw, work.expect_bytes);
+                        epd_display_frame(paint_fb, work.expect_bytes);
                     }
                     free(rt->shadow_fb);
                     rt->shadow_fb = raw;
@@ -1211,9 +1215,9 @@ bool session_run_try_button_wake(button_id_t woke_btn, uint64_t *event_seq,
         return false;
     }
 
-    /* Locally handled wake button: clear the pending network button action */
+    /* Locally handled wake button: clear the pending network button action
+     * (main.c already triggered buzzer_feedback() on wake). */
     rest_set_button("", 0);
-    buzzer_feedback();
 
     bool ok = launch_validated_session(rt, true, event_seq, fallthrough,
                                        maintenance_requested);

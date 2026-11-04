@@ -182,6 +182,7 @@ bool wifi_manager_get_sta_ip(char *out, size_t out_sz)
     if (!out || out_sz == 0) return false;
     out[0] = '\0';
 
+    if (!s_inited) return false;
     esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
     if (!netif) return false;
     esp_netif_ip_info_t ip;

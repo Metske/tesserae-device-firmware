@@ -28,6 +28,7 @@
 #include "overlay_run.h"       /* work framebuffer + partial refresh */
 #include "panel/epd_panel.h"   /* epd_active_driver()->info.bpp */
 #include "rest_config.h"
+#include "wifi_manager.h"
 #include "cache_storage.h"
 #include "touch3.h"
 #include "widget_region.h"
@@ -499,6 +500,9 @@ void touch3_after_paint(const char *frame_digest)
 
 static bool report_send(const t3_report_t *rep, rest_interact_out_t *out)
 {
+    char ip[16];
+    if (!wifi_manager_get_sta_ip(ip, sizeof ip)) return false;
+
     rest_status_t st = rest_post_interact(rep->primitive_id, rep->interaction,
                                          rep->has_value, rep->value,
                                          rep->layout_digest, rep->event_id,

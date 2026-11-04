@@ -4153,9 +4153,10 @@ void app_main(void)
                 snprintf(pending_patches, sizeof pending_patches, "%s",
                          so.overlay_patches);
             /* A touch wake hit-tests and feeds back before the radio is up, so
-             * its /interact report queued. The radio is up now: drain it here
+             * its /interact or /tap report queued. The radio is up now: drain it here
              * rather than relying on a linger window existing (battery mode has
              * none -- firmware-spec §11 wake -> report -> sleep). */
+            proto2_flush_reports();
             touch3_flush_reports();
 #endif
             /* Deck resync signal: decided here, executed at the tail of the
